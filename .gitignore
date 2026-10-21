@@ -1,0 +1,6 @@
+bin/
+obj/
+*.dacpac
+*.user
+.vs/
+__pycache__/

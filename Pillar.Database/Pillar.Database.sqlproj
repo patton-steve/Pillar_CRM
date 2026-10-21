@@ -1,0 +1,20 @@
+<Project DefaultTargets="Build">
+  <Sdk Name="Microsoft.Build.Sql" Version="1.0.0" />
+  <PropertyGroup>
+    <Name>Pillar.Database</Name>
+    <!-- SQL Server 2019 (works on 2019 Express and newer, including 2022). Switch to SqlAzureV12DatabaseSchemaProvider to have the build flag anything Azure SQL Database lacks. -->
+    <DSP>Microsoft.Data.Tools.Schema.Sql.Sql150DatabaseSchemaProvider</DSP>
+    <ModelCollation>1033, CI</ModelCollation>
+    <DefaultSchema>dbo</DefaultSchema>
+    <TreatTSqlWarningsAsErrors>False</TreatTSqlWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Seed data runs after every publish, not as part of the model. -->
+    <Build Remove="Scripts\**" />
+    <PostDeploy Include="Scripts\Script.PostDeployment.sql" />
+    <!-- sys.sp_set_session_context lives in master; no master dacpac reference just for this one call. -->
+    <Build Update="Security\usp_ReportContext_Set.sql">
+      <SuppressTSqlWarnings>71502</SuppressTSqlWarnings>
+    </Build>
+  </ItemGroup>
+</Project>

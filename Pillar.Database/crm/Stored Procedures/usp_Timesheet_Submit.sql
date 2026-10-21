@@ -1,0 +1,66 @@
+-- Submits every draft entry on a week: the session user's own week, or anyone's when the session user holds
+-- time.enter_others. Refused while a timer is running on the week, when there is nothing to submit, or when
+-- TimeEntry.NoteRequired is on and an entry has no description. When TimeEntry.RequireApproval resolves to 0 for the
+-- week's owner, the entries are approved (rate frozen) in the same step, as usp_TimeEntry_Submit does for one entry.
+CREATE PROCEDURE crm.usp_Timesheet_Submit
+    @TimesheetId INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @TenantId INT = CONVERT(INT, SESSION_CONTEXT(N'TenantId')),
+            @Actor    INT = CONVERT(INT, SESSION_CONTEXT(N'UserId')),
+            @Now DATETIME2(0) = SYSUTCDATETIME(),
+            @OwnerId INT, @Require BIT, @NoteRequired BIT, @Target VARCHAR(30);
+
+    IF @TenantId IS NULL OR @Actor IS NULL THROW 50501, N'SESSION_CONTEXT TenantId and UserId must be set.', 1;
+
+    SELECT @OwnerId = AppUserId FROM crm.Timesheet WHERE TenantId = @TenantId AND Id = @TimesheetId;
+    IF @OwnerId IS NULL THROW 50582, N'Timesheet not found.', 1;
+    IF @OwnerId <> @Actor AND NOT EXISTS (SELECT 1 FROM sec.fn_UserHasPermission(@TenantId, @Actor, 'time.enter_others'))
+        THROW 50512, N'You can only enter your own time.', 1;
+
+    SELECT @Require = ISNULL(TRY_CONVERT(BIT, Value), 1) FROM admin.fn_Setting(@TenantId, @OwnerId, 'TimeEntry.RequireApproval');
+    SELECT @NoteRequired = ISNULL(TRY_CONVERT(BIT, Value), 0) FROM admin.fn_Setting(@TenantId, @OwnerId, 'TimeEntry.NoteRequired');
+    SET @Target = CASE WHEN @Require = 1 THEN 'SUBMITTED' ELSE 'APPROVED' END;
+
+    BEGIN TRAN;
+
+    DECLARE @Draft TABLE (Id INT PRIMARY KEY, Running BIT, NoNote BIT);
+    INSERT INTO @Draft (Id, Running, NoNote)
+    SELECT e.Id, IIF(e.EnteredMinutes IS NULL, 1, 0), IIF(NULLIF(LTRIM(RTRIM(e.Description)), N'') IS NULL, 1, 0)
+    FROM crm.TimeEntry AS e WITH (UPDLOCK)
+    JOIN lkp.TimeEntryStatus AS s ON s.TenantId = e.TenantId AND s.Id = e.TimeEntryStatusId
+    WHERE e.TenantId = @TenantId AND e.TimesheetId = @TimesheetId AND e.DeletedAt IS NULL AND s.SystemCode = 'DRAFT';
+
+    IF NOT EXISTS (SELECT 1 FROM @Draft) THROW 50583, N'There is no unsubmitted time on this timesheet.', 1;
+    IF EXISTS (SELECT 1 FROM @Draft WHERE Running = 1) THROW 50584, N'Stop the running timer before submitting the week.', 1;
+    IF @NoteRequired = 1 AND EXISTS (SELECT 1 FROM @Draft WHERE NoNote = 1)
+        THROW 50585, N'Every entry needs a description before the week can be submitted.', 1;
+
+    UPDATE e
+    SET TimeEntryStatusId = st.Id,
+        SubmittedAt = @Now,
+        ApprovedAt  = CASE WHEN @Target = 'APPROVED' THEN @Now END,
+        ApprovedBy  = CASE WHEN @Target = 'APPROVED' THEN @Actor END,
+        RateApplied = r.Rate, RateSource = r.RateSource,
+        RejectedAt = NULL, RejectedBy = NULL, RejectedReason = NULL,
+        ModifiedAt = @Now, ModifiedBy = @Actor
+    FROM crm.TimeEntry AS e
+    JOIN @Draft AS d ON d.Id = e.Id
+    JOIN crm.ClientTask AS t ON t.TenantId = e.TenantId AND t.Id = e.TaskId
+    JOIN lkp.TimeEntryStatus AS st ON st.TenantId = e.TenantId AND st.SystemCode = @Target
+    OUTER APPLY crm.fn_ResolveRate(e.TenantId, e.ProjectId, e.AppUserId, t.TaskTypeId, e.WorkDate) AS r
+    WHERE e.TenantId = @TenantId;
+
+    UPDATE crm.Timesheet
+    SET SubmittedAt = @Now, SubmittedBy = @Actor,
+        ApprovedAt = CASE WHEN @Target = 'APPROVED' THEN @Now ELSE ApprovedAt END,
+        ApprovedBy = CASE WHEN @Target = 'APPROVED' THEN @Actor ELSE ApprovedBy END
+    WHERE TenantId = @TenantId AND Id = @TimesheetId;
+
+    EXEC crm.usp_Timesheet_SyncStatus @TenantId = @TenantId, @TimesheetId = @TimesheetId;
+
+    COMMIT;
+END;

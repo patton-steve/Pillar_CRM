@@ -1,0 +1,52 @@
+-- Rules on sec.AppUser:
+--   only a platform admin session can grant or remove IsPlatformAdmin
+--   a new login (insert, or CanLogin/Status turned on) may not exceed Tenant.MaxUsers (people without a login don't count)
+--   a tenant keeps at least one ACTIVE owner who can log in
+--   sec.UserCredential follows the user's email and enabled state; disabling a user revokes its refresh tokens
+CREATE TRIGGER sec.trg_AppUser_Rules
+ON sec.AppUser
+AFTER INSERT, UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF EXISTS (SELECT 1 FROM inserted AS i LEFT JOIN deleted AS d ON d.Id = i.Id
+               WHERE i.IsPlatformAdmin <> ISNULL(d.IsPlatformAdmin, 0))
+       AND ISNULL(CAST(SESSION_CONTEXT(N'IsPlatformAdmin') AS BIT), 0) = 0
+        THROW 50931, N'Only Pillar can change platform admin access.', 1;
+
+    IF EXISTS (
+        SELECT 1
+        FROM (SELECT DISTINCT i.TenantId
+              FROM inserted AS i LEFT JOIN deleted AS d ON d.Id = i.Id
+              WHERE i.CanLogin = 1 AND i.Status <> 'DISABLED'
+                AND (d.Id IS NULL OR d.CanLogin = 0 OR d.Status = 'DISABLED')) AS t
+        CROSS APPLY admin.fn_Setting(t.TenantId, NULL, 'Tenant.MaxUsers') AS m
+        WHERE TRY_CAST(m.Value AS INT) IS NOT NULL
+          AND (SELECT COUNT(*) FROM sec.AppUser AS u
+               WHERE u.TenantId = t.TenantId AND u.CanLogin = 1 AND u.Status <> 'DISABLED') > TRY_CAST(m.Value AS INT))
+        THROW 50932, N'Your plan''s user limit has been reached.', 1;
+
+    IF EXISTS (
+        SELECT 1
+        FROM (SELECT DISTINCT d.TenantId FROM deleted AS d
+              JOIN sec.Role AS r ON r.TenantId = d.TenantId AND r.Id = d.RoleId AND r.IsOwner = 1
+              WHERE d.Status = 'ACTIVE' AND d.CanLogin = 1) AS t
+        WHERE NOT EXISTS (SELECT 1 FROM sec.AppUser AS u
+                          JOIN sec.Role AS r ON r.TenantId = u.TenantId AND r.Id = u.RoleId AND r.IsOwner = 1
+                          WHERE u.TenantId = t.TenantId AND u.Status = 'ACTIVE' AND u.CanLogin = 1))
+        THROW 50933, N'The account needs at least one active owner.', 1;
+
+    UPDATE c
+    SET LoginEmail = COALESCE(i.EmailNormalized, c.LoginEmail),
+        IsEnabled  = CASE WHEN i.CanLogin = 1 AND i.Status <> 'DISABLED' THEN 1 ELSE 0 END,
+        ModifiedAt = SYSUTCDATETIME()
+    FROM sec.UserCredential AS c
+    JOIN inserted AS i ON i.Id = c.AppUserId;
+
+    UPDATE t
+    SET RevokedAt = SYSUTCDATETIME(), RevokedReason = 'DISABLED'
+    FROM sec.RefreshToken AS t
+    JOIN inserted AS i ON i.Id = t.AppUserId
+    WHERE t.RevokedAt IS NULL AND (i.CanLogin = 0 OR i.Status = 'DISABLED');
+END;
