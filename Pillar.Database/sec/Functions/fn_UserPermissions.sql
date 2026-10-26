@@ -7,7 +7,7 @@ RETURN
     FROM sec.AppUser AS u
     JOIN sec.Role AS r ON r.TenantId = u.TenantId AND r.Id = u.RoleId AND r.IsActive = 1
     JOIN sec.Permission AS p
-      ON r.IsOwner = 1
+      ON p.IsActive = 1 AND (r.IsOwner = 1
       OR EXISTS (SELECT 1 FROM sec.RolePermission AS rp
-                 WHERE rp.TenantId = r.TenantId AND rp.RoleId = r.Id AND rp.PermissionCode = p.Code)
+                 WHERE rp.TenantId = r.TenantId AND rp.RoleId = r.Id AND rp.PermissionCode = p.Code))
     WHERE u.TenantId = @TenantId AND u.Id = @AppUserId AND u.Status = 'ACTIVE';

@@ -30,6 +30,8 @@ CREATE TABLE crm.ClientTask
     RowVer          ROWVERSION      NOT NULL,
     ValidFrom       DATETIME2(2)    GENERATED ALWAYS AS ROW START HIDDEN NOT NULL,
     ValidTo         DATETIME2(2)    GENERATED ALWAYS AS ROW END HIDDEN NOT NULL,
+    StepsToReplicate    NVARCHAR(MAX)   NULL,  -- rich text, shown beside Description on the task page
+    ResolutionCriteria  NVARCHAR(MAX)   NULL,  -- rich text: what "done" means
     PERIOD FOR SYSTEM_TIME (ValidFrom, ValidTo),
     CONSTRAINT UQ_ClientTask_PublicId UNIQUE (PublicId),
     CONSTRAINT UQ_ClientTask_Tenant_Id UNIQUE (TenantId, Id),

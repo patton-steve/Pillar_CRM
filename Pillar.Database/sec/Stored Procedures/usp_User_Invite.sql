@@ -1,7 +1,9 @@
 -- Invites someone to log in to the session tenant. Creates the user (Status INVITED), or gives an existing
 -- no-login person a login on the same row (their time and history stay attached), or re-sends a pending invite.
 -- The API generates the random token, emails the link, and passes only its SHA-256 hash. Earlier unused invites are revoked.
--- Who may invite (users.manage) is checked by the API.
+-- Who may invite (users.manage) is checked by the API. Handoff 22: invites open once Pillar approves the account (Tenant.Status
+-- ACTIVE); a login past the plan's included seats is an extra paid seat that only billing.manage holders may add (the API shows
+-- "This adds $X/month" from admin.usp_Seats_Get first; sec.trg_AppUser_Rules enforces it).
 CREATE PROCEDURE sec.usp_User_Invite
     @Email          NVARCHAR(254),
     @TokenHash      BINARY(32),
@@ -22,6 +24,8 @@ BEGIN
             @Normalized NVARCHAR(254) = LOWER(LTRIM(RTRIM(@Email)));
 
     IF @TenantId IS NULL THROW 50941, N'No tenant in session.', 1;
+    IF NOT EXISTS (SELECT 1 FROM admin.Tenant WHERE Id = @TenantId AND Status = 'ACTIVE')
+        THROW 52210, N'Team invites open once Pillar approves your account.', 1;
     IF @Normalized IS NULL OR @Normalized NOT LIKE N'_%@_%._%' THROW 50942, N'A valid email is required.', 1;
     IF EXISTS (SELECT 1 FROM sec.UserCredential WHERE LoginEmail = @Normalized AND AppUserId <> ISNULL(@AppUserId, 0))
         THROW 50943, N'That email is already used by another login.', 1;
@@ -56,6 +60,9 @@ BEGIN
 
     INSERT INTO sec.UserToken (TenantId, AppUserId, Purpose, TokenHash, ExpiresAt)
     VALUES (@TenantId, @AppUserId, 'INVITE', @TokenHash, COALESCE(@ExpiresAt, DATEADD(DAY, 7, @Now)));
+
+    DECLARE @AuditKey NVARCHAR(100) = CONVERT(NVARCHAR(100), @AppUserId), @AuditSummary NVARCHAR(400) = CONCAT(N'Invited ', @Normalized);
+    EXEC admin.usp_Audit_Write @Area = 'users', @EntityType = 'USER', @EntityKey = @AuditKey, @Action = 'CREATE', @Summary = @AuditSummary;
 
     COMMIT;
 END;

@@ -3,6 +3,8 @@
 --   expense report PayeeUserId set   (a user's out-of-pocket expenses to reimburse; needs Feature.ExpenseReports)
 -- Flow: DRAFT -> SUBMITTED (when AP.RequireApproval) -> OPEN -> PARTIAL -> PAID, or VOID.
 -- BillNumber is internal (NumberSequence 'BILL' or 'EXPENSE'); VendorInvoiceNumber is the vendor's own number.
+-- Weekly expenses (Steve 2026-10-22): TimesheetId ties a user's expense report to one timesheet week. ap.usp_Expense_Save
+-- creates it with the week's first expense, and it is submitted, approved and sent back with the timesheet, never on its own.
 CREATE TABLE ap.Bill
 (
     Id                      INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_Bill PRIMARY KEY CLUSTERED,
@@ -36,6 +38,7 @@ CREATE TABLE ap.Bill
     ModifiedAt              DATETIME2(0)    NULL,
     ModifiedBy              INT             NULL,
     RowVer                  ROWVERSION      NOT NULL,
+    TimesheetId             INT             NULL,      -- weekly expense report: the payee's timesheet week. Last so a publish appends it.
     CONSTRAINT UQ_Bill_PublicId UNIQUE (PublicId),
     CONSTRAINT UQ_Bill_Tenant_Id UNIQUE (TenantId, Id),
     CONSTRAINT UQ_Bill_Tenant_Number UNIQUE (TenantId, BillNumber),
@@ -44,7 +47,9 @@ CREATE TABLE ap.Bill
     CONSTRAINT FK_Bill_Vendor FOREIGN KEY (TenantId, VendorId) REFERENCES ap.Vendor (TenantId, Id),
     CONSTRAINT FK_Bill_PaymentTerm FOREIGN KEY (TenantId, PaymentTermId) REFERENCES lkp.PaymentTerm (TenantId, Id),
     CONSTRAINT FK_Bill_Status FOREIGN KEY (TenantId, BillStatusId) REFERENCES lkp.BillStatus (TenantId, Id),
-    CONSTRAINT FK_Bill_PayeeUser FOREIGN KEY (TenantId, PayeeUserId) REFERENCES sec.AppUser (TenantId, Id)
+    CONSTRAINT FK_Bill_PayeeUser FOREIGN KEY (TenantId, PayeeUserId) REFERENCES sec.AppUser (TenantId, Id),
+    CONSTRAINT CK_Bill_Timesheet CHECK (TimesheetId IS NULL OR PayeeUserId IS NOT NULL),
+    CONSTRAINT FK_Bill_Timesheet FOREIGN KEY (TenantId, TimesheetId) REFERENCES crm.Timesheet (TenantId, Id)
 );
 GO
 -- the same vendor invoice can't be entered twice
@@ -52,3 +57,8 @@ CREATE UNIQUE NONCLUSTERED INDEX UX_Bill_VendorInvoice ON ap.Bill (TenantId, Ven
     WHERE VendorId IS NOT NULL AND VendorInvoiceNumber IS NOT NULL AND VoidedAt IS NULL;
 GO
 CREATE NONCLUSTERED INDEX IX_Bill_Status_Due ON ap.Bill (TenantId, BillStatusId, DueDate) INCLUDE (BalanceDue);
+
+GO
+-- one live expense report per timesheet week
+CREATE UNIQUE NONCLUSTERED INDEX UX_Bill_Timesheet ON ap.Bill (TenantId, TimesheetId)
+    WHERE TimesheetId IS NOT NULL AND VoidedAt IS NULL;

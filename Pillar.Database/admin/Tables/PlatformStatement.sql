@@ -2,6 +2,9 @@
 -- charged to the tenant's card on file by the API, and settled through admin.usp_PlatformStatement_RecordPayment.
 -- Tenants can read their own statements (Settings > Billing); only Pillar's procs write them.
 -- Status: OPEN (to be charged), PAST_DUE (a charge failed), PAID, VOID. A statement with nothing due is PAID at creation.
+-- Handoff 22: SubscriptionTotal is the PLAN, SEATS and PILO lines; AmountDue = FeeTotal + MinimumAdjustment + SubscriptionTotal
+-- + CreditApplied (floored at 0). A failed charge sets NextRetryAt (1, 3 then 5 days later; NULL after the fourth failure).
+-- No lockout in phase 1: the app shows a banner while a statement is PAST_DUE.
 CREATE TABLE admin.PlatformStatement
 (
     Id                  INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_PlatformStatement PRIMARY KEY CLUSTERED,
@@ -27,6 +30,8 @@ CREATE TABLE admin.PlatformStatement
     VoidReason          NVARCHAR(500)   NULL,
     CreatedAt           DATETIME2(0)    NOT NULL CONSTRAINT DF_PlatformStatement_CreatedAt DEFAULT (SYSUTCDATETIME()),
     RowVer              ROWVERSION      NOT NULL,
+    SubscriptionTotal   DECIMAL(19,2)   NOT NULL CONSTRAINT DF_PlatformStatement_SubscriptionTotal DEFAULT (0),  -- handoff 22: appended
+    NextRetryAt         DATETIME2(0)    NULL,      -- when the API's retry job charges the card again
     CONSTRAINT UQ_PlatformStatement_PublicId UNIQUE (PublicId),
     CONSTRAINT UQ_PlatformStatement_Tenant_Id UNIQUE (TenantId, Id),
     CONSTRAINT CK_PlatformStatement_Status CHECK (Status IN ('OPEN', 'PAST_DUE', 'PAID', 'VOID')),
@@ -39,5 +44,7 @@ GO
 CREATE UNIQUE NONCLUSTERED INDEX UX_PlatformStatement_Tenant_Period ON admin.PlatformStatement (TenantId, PeriodStart) WHERE Status <> 'VOID';
 GO
 CREATE UNIQUE NONCLUSTERED INDEX UX_PlatformStatement_Number ON admin.PlatformStatement (StatementNumber) WHERE Status <> 'VOID';
+GO
+CREATE NONCLUSTERED INDEX IX_PlatformStatement_Retry ON admin.PlatformStatement (NextRetryAt) INCLUDE (TenantId) WHERE NextRetryAt IS NOT NULL;
 GO
 CREATE NONCLUSTERED INDEX IX_PlatformStatement_Unpaid ON admin.PlatformStatement (Status, DueDate) INCLUDE (TenantId, BalanceDue) WHERE Status IN ('OPEN', 'PAST_DUE');

@@ -1,4 +1,5 @@
 -- Approves a submitted bill or expense report (SUBMITTED -> OPEN). Billable lines become available to invoice runs.
+-- A weekly expense report (TimesheetId set) is refused: it is approved with its week (crm.usp_Timesheet_Approve).
 CREATE PROCEDURE ap.usp_Bill_Approve
     @BillId INT
 AS
@@ -7,6 +8,9 @@ BEGIN
 
     DECLARE @TenantId INT = CAST(SESSION_CONTEXT(N'TenantId') AS INT),
             @UserId   INT = CAST(SESSION_CONTEXT(N'UserId') AS INT), @Now DATETIME2(0) = SYSUTCDATETIME();
+
+    IF EXISTS (SELECT 1 FROM ap.Bill WHERE TenantId = @TenantId AND Id = @BillId AND TimesheetId IS NOT NULL)
+        THROW 52312, N'This expense report goes with its timesheet week. Submit, approve or send back the week instead.', 1;
 
     UPDATE b
     SET BillStatusId = o.Id, ApprovedAt = @Now, ApprovedBy = @UserId, ModifiedAt = @Now, ModifiedBy = @UserId

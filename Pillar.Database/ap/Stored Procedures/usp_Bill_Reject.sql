@@ -1,4 +1,5 @@
 -- Sends a submitted bill or expense report back to DRAFT with a reason.
+-- A weekly expense report (TimesheetId set) is refused: it goes back with its week (crm.usp_Timesheet_Reject).
 CREATE PROCEDURE ap.usp_Bill_Reject
     @BillId     INT,
     @Reason     NVARCHAR(500)
@@ -8,6 +9,9 @@ BEGIN
 
     DECLARE @TenantId INT = CAST(SESSION_CONTEXT(N'TenantId') AS INT),
             @UserId   INT = CAST(SESSION_CONTEXT(N'UserId') AS INT), @Now DATETIME2(0) = SYSUTCDATETIME();
+
+    IF EXISTS (SELECT 1 FROM ap.Bill WHERE TenantId = @TenantId AND Id = @BillId AND TimesheetId IS NOT NULL)
+        THROW 52312, N'This expense report goes with its timesheet week. Submit, approve or send back the week instead.', 1;
 
     IF NULLIF(LTRIM(@Reason), N'') IS NULL THROW 50841, N'A rejection reason is required.', 1;
 

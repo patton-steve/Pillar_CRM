@@ -3,6 +3,7 @@
 -- (grant the API EXECUTE on them, not SELECT on this table).
 -- LoginEmail and IsEnabled mirror sec.AppUser (kept in step by sec.trg_AppUser_Rules).
 -- PasswordHash is bcrypt from the API; NULL until an invite is accepted. MfaSecret is encrypted by the API before it gets here.
+-- EmailVerifiedAt: the sign-up owner must verify their email before the setup wizard (sec.usp_Auth_VerifyEmail).
 CREATE TABLE sec.UserCredential
 (
     AppUserId           INT             NOT NULL CONSTRAINT PK_UserCredential PRIMARY KEY CLUSTERED,
@@ -20,6 +21,7 @@ CREATE TABLE sec.UserCredential
     LastLoginAt         DATETIME2(0)    NULL,
     CreatedAt           DATETIME2(0)    NOT NULL CONSTRAINT DF_UserCredential_CreatedAt DEFAULT (SYSUTCDATETIME()),
     ModifiedAt          DATETIME2(0)    NULL,
+    EmailVerifiedAt     DATETIME2(0)    NULL,          -- handoff 22: appended. Set by a VERIFY link, or by accepting an invite or a reset
     CONSTRAINT UQ_UserCredential_LoginEmail UNIQUE (LoginEmail),
     CONSTRAINT CK_UserCredential_RecoveryCodes CHECK (RecoveryCodeHashes IS NULL OR ISJSON(RecoveryCodeHashes) = 1),
     CONSTRAINT FK_UserCredential_AppUser FOREIGN KEY (TenantId, AppUserId) REFERENCES sec.AppUser (TenantId, Id)

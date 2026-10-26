@@ -1,5 +1,7 @@
 -- Approves every submitted entry on a week and freezes their rates. Who may approve (time.approve) is checked by the API.
 -- Entries still in draft (added after the submit, or sent back one by one) are left alone and keep the week from showing APPROVED.
+-- Handoff 23: the week's submitted expense report is approved with it (SUBMITTED -> OPEN), so the time approver approves
+-- the week's expenses too.
 CREATE PROCEDURE crm.usp_Timesheet_Approve
     @TimesheetId INT
 AS
@@ -9,7 +11,7 @@ BEGIN
 
     DECLARE @TenantId INT = CONVERT(INT, SESSION_CONTEXT(N'TenantId')),
             @UserId   INT = CONVERT(INT, SESSION_CONTEXT(N'UserId')),
-            @Now DATETIME2(0) = SYSUTCDATETIME();
+            @Now DATETIME2(0) = SYSUTCDATETIME(), @TimeRows INT, @ExpRows INT;
 
     BEGIN TRAN;
 
@@ -24,7 +26,17 @@ BEGIN
     OUTER APPLY crm.fn_ResolveRate(e.TenantId, e.ProjectId, e.AppUserId, t.TaskTypeId, e.WorkDate) AS r
     WHERE e.TenantId = @TenantId AND e.TimesheetId = @TimesheetId AND e.DeletedAt IS NULL;
 
-    IF @@ROWCOUNT = 0 THROW 50586, N'There is no submitted time on this timesheet to approve.', 1;
+    SET @TimeRows = @@ROWCOUNT;
+
+    UPDATE b
+    SET BillStatusId = o.Id, ApprovedAt = @Now, ApprovedBy = @UserId, ModifiedAt = @Now, ModifiedBy = @UserId
+    FROM ap.Bill AS b
+    JOIN lkp.BillStatus AS s ON s.TenantId = b.TenantId AND s.Id = b.BillStatusId AND s.SystemCode = 'SUBMITTED'
+    JOIN lkp.BillStatus AS o ON o.TenantId = b.TenantId AND o.SystemCode = 'OPEN'
+    WHERE b.TenantId = @TenantId AND b.TimesheetId = @TimesheetId AND b.VoidedAt IS NULL;
+    SET @ExpRows = @@ROWCOUNT;
+
+    IF @TimeRows = 0 AND @ExpRows = 0 THROW 50586, N'There is no submitted time or expenses on this timesheet to approve.', 1;
 
     UPDATE crm.Timesheet SET ApprovedAt = @Now, ApprovedBy = @UserId WHERE TenantId = @TenantId AND Id = @TimesheetId;
     EXEC crm.usp_Timesheet_SyncStatus @TenantId = @TenantId, @TimesheetId = @TimesheetId;

@@ -1,5 +1,6 @@
 -- Every charge attempt against a platform statement, successful or not, as reported by the API after calling the processor.
--- Written only by admin.usp_PlatformStatement_RecordPayment.
+-- Written only by admin.usp_PlatformStatement_RecordPayment. A payment Pillar marked paid by hand (admin.usp_PlatformStatement_MarkPaid)
+-- has no ProcessorChargeId and says why in Note.
 CREATE TABLE admin.PlatformPayment
 (
     Id                  INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_PlatformPayment PRIMARY KEY CLUSTERED,
@@ -12,6 +13,8 @@ CREATE TABLE admin.PlatformPayment
     FailureReason       NVARCHAR(500)   NULL,
     MethodDisplay       NVARCHAR(60)    NULL,      -- snapshot, e.g. "Visa ending 4242"
     AttemptedAt         DATETIME2(0)    NOT NULL CONSTRAINT DF_PlatformPayment_AttemptedAt DEFAULT (SYSUTCDATETIME()),
+    Note                NVARCHAR(500)   NULL,      -- handoff 22: appended
+    RecordedBy          INT             NULL CONSTRAINT DF_PlatformPayment_RecordedBy DEFAULT (CONVERT(INT, SESSION_CONTEXT(N'UserId'))),
     CONSTRAINT CK_PlatformPayment_Amount CHECK (Amount > 0),
     CONSTRAINT FK_PlatformPayment_Statement FOREIGN KEY (TenantId, StatementId) REFERENCES admin.PlatformStatement (TenantId, Id),
     CONSTRAINT FK_PlatformPayment_Method FOREIGN KEY (TenantId, PaymentMethodId) REFERENCES admin.TenantPaymentMethod (TenantId, Id)

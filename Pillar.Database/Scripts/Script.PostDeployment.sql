@@ -1,8 +1,8 @@
 /*
 Post-deployment seed: Pillar-owned rows (SystemCode and lkp.Default* masters).
 Runs after every publish and is rerunnable. It inserts missing rows and updates
-Pillar-owned columns. It never deletes, and never touches tenant lists; use
-lkp.usp_SyncTenantLookups to push new defaults to tenants.
+Pillar-owned columns. It never deletes or changes tenant rows; near the end it runs
+lkp.usp_SyncTenantLookups, which only adds missing default lookup rows to each tenant.
 */
 SET NOCOUNT ON;
 EXEC sp_set_session_context N'IsPlatformAdmin', 1;
@@ -60,7 +60,11 @@ USING (VALUES
     ('TimesheetStatus',  'OPEN',        N'Has unsubmitted time (or none yet)', 10),
     ('TimesheetStatus',  'SUBMITTED',   N'Waiting for approval', 20),
     ('TimesheetStatus',  'APPROVED',    N'All time approved', 30),
-    ('TimesheetStatus',  'REJECTED',    N'Time sent back with a reason', 40)
+    ('TimesheetStatus',  'REJECTED',    N'Time sent back with a reason', 40),
+    ('NoteType',         'CALL',        N'Phone or video call', 10),
+    ('NoteType',         'MEETING',     N'Meeting', 20),
+    ('NoteType',         'EMAIL',       N'Email', 30),
+    ('NoteType',         'NOTE',        N'General note', 40)
 ) AS s (LookupName, SystemCode, Description, SortOrder)
 ON t.LookupName = s.LookupName AND t.SystemCode = s.SystemCode
 WHEN MATCHED THEN UPDATE SET Description = s.Description, SortOrder = s.SortOrder
@@ -273,20 +277,59 @@ ON t.Code = s.Code
 WHEN MATCHED THEN UPDATE SET Name = s.Name, SortOrder = s.SortOrder, SystemCode = s.SystemCode, IsDefault = s.IsDefault, IsLocked = 1
 WHEN NOT MATCHED THEN INSERT (Code, Name, SortOrder, SystemCode, IsDefault, IsLocked) VALUES (s.Code, s.Name, s.SortOrder, s.SystemCode, s.IsDefault, 1);
 
+-- Prices and seats (Steve 2026-10-22). Extra seats are $12 per user per month on every plan, Flat included.
 MERGE admin.[Plan] AS t
 USING (VALUES
-    ('STANDARD',   N'Flat',            0.025000, NULL, NULL, 1),
-    ('AI_POWERED', N'AI Powered',      0.025000, NULL, NULL, 0),
-    ('AI_PLUS',    N'AI Powered Plus', 0.025000, NULL, NULL, 0),
-    ('ENTERPRISE', N'Enterprise',      0.025000, NULL, NULL, 0)
-) AS s (Code, Name, FeeRate, PerInvoiceCap, MonthlyMinimum, IsDefault)
+    --                                 fee rate   cap   min   default  price  seats  extra seat  AI reports  overage  sort
+    ('STANDARD',   N'Flat',            0.025000, NULL, NULL, 1,        0.00,  2,     12.00,      0,          NULL,    10),
+    ('AI_POWERED', N'AI Powered',      0.025000, NULL, NULL, 0,       39.00,  5,     12.00,      60,         0.75,    20),
+    ('AI_PLUS',    N'AI Powered Plus', 0.025000, NULL, NULL, 0,       89.00,  10,    12.00,      200,        0.50,    30),
+    ('ENTERPRISE', N'Enterprise',      0.025000, NULL, NULL, 0,      209.00,  20,    12.00,      500,        0.35,    40)
+) AS s (Code, Name, FeeRate, PerInvoiceCap, MonthlyMinimum, IsDefault, MonthlyPrice, IncludedSeats, ExtraSeatPrice, IncludedAiReports, AiOveragePrice, SortOrder)
 ON t.Code = s.Code
 WHEN MATCHED THEN UPDATE SET Name = s.Name, FeeRate = s.FeeRate, PerInvoiceCap = s.PerInvoiceCap,
-    MonthlyMinimum = s.MonthlyMinimum, IsDefault = s.IsDefault
-WHEN NOT MATCHED THEN INSERT (Code, Name, FeeRate, PerInvoiceCap, MonthlyMinimum, IsDefault)
-    VALUES (s.Code, s.Name, s.FeeRate, s.PerInvoiceCap, s.MonthlyMinimum, s.IsDefault);
+    MonthlyMinimum = s.MonthlyMinimum, IsDefault = s.IsDefault, MonthlyPrice = s.MonthlyPrice, IncludedSeats = s.IncludedSeats,
+    ExtraSeatPrice = s.ExtraSeatPrice, IncludedAiReports = s.IncludedAiReports, AiOveragePrice = s.AiOveragePrice, SortOrder = s.SortOrder
+WHEN NOT MATCHED THEN INSERT (Code, Name, FeeRate, PerInvoiceCap, MonthlyMinimum, IsDefault, MonthlyPrice, IncludedSeats, ExtraSeatPrice,
+    IncludedAiReports, AiOveragePrice, SortOrder)
+    VALUES (s.Code, s.Name, s.FeeRate, s.PerInvoiceCap, s.MonthlyMinimum, s.IsDefault, s.MonthlyPrice, s.IncludedSeats, s.ExtraSeatPrice,
+    s.IncludedAiReports, s.AiOveragePrice, s.SortOrder);
 
 ------------------------------------------------------------------ Reports
+MERGE admin.ReportCategory AS t
+USING (VALUES
+    ('MONEY',    N'Money',           10),
+    ('TIME',     N'Time',            20),
+    ('PROJECTS', N'Projects',        30),
+    ('CLIENTS',  N'Clients',         40),
+    ('BILLS',    N'Bills & vendors', 50)
+) AS s (Code, Name, SortOrder)
+ON t.Code = s.Code
+WHEN MATCHED THEN UPDATE SET Name = s.Name, SortOrder = s.SortOrder
+WHEN NOT MATCHED THEN INSERT (Code, Name, SortOrder) VALUES (s.Code, s.Name, s.SortOrder);
+
+MERGE admin.ReportRenderType AS t
+USING (VALUES
+    ('TABLE',       N'Table',                 10),
+    ('BAR',         N'Bar',                   20),
+    ('STACKED_BAR', N'Stacked bar',           30),
+    ('LINE',        N'Line',                  40),
+    ('AREA',        N'Area',                  50),
+    ('DONUT',       N'Donut',                 60),
+    ('KPI',         N'KPI cards',             70),
+    ('PIVOT',       N'Pivot / matrix',        80),
+    ('TREND',       N'Trend vs last period',  90),
+    ('AGING',       N'Aging buckets',        100),
+    ('WATERFALL',   N'Waterfall',            110),
+    ('SCATTER',     N'Scatter',              120),
+    ('HEATMAP',     N'Calendar heatmap',     130)
+) AS s (Code, Name, SortOrder)
+ON t.Code = s.Code
+WHEN MATCHED THEN UPDATE SET Name = s.Name, SortOrder = s.SortOrder
+WHEN NOT MATCHED THEN INSERT (Code, Name, SortOrder) VALUES (s.Code, s.Name, s.SortOrder);
+
+-- canned (ANALYTIC) reports: add a row with CategoryCode and PermissionCode once its RDL is deployed, and its
+-- USER parameters below with Label, ListSource and IsRequired
 MERGE admin.Report AS t
 USING (VALUES
     ('INVOICE_S', N'Invoice - Summary',                 'INVOICE', N'/Pillar/Invoice_Summary',    N'One line per invoice line; totals, remit-to and notes.', 10),
@@ -356,6 +399,17 @@ ON t.Code = s.Code
 WHEN MATCHED THEN UPDATE SET Name = s.Name, SortOrder = s.SortOrder, SystemCode = s.SystemCode, IsDefault = s.IsDefault, IsLocked = 1
 WHEN NOT MATCHED THEN INSERT (Code, Name, SortOrder, SystemCode, IsDefault, IsLocked) VALUES (s.Code, s.Name, s.SortOrder, s.SystemCode, s.IsDefault, 1);
 
+MERGE lkp.DefaultNoteType AS t
+USING (VALUES
+    (N'CALL',    N'Call',    10, 'CALL',    0),
+    (N'MEETING', N'Meeting', 20, 'MEETING', 0),
+    (N'EMAIL',   N'Email',   30, 'EMAIL',   0),
+    (N'NOTE',    N'Note',    40, 'NOTE',    1)
+) AS s (Code, Name, SortOrder, SystemCode, IsDefault)
+ON t.Code = s.Code
+WHEN MATCHED THEN UPDATE SET Name = s.Name, SortOrder = s.SortOrder, SystemCode = s.SystemCode, IsDefault = s.IsDefault
+WHEN NOT MATCHED THEN INSERT (Code, Name, SortOrder, SystemCode, IsDefault) VALUES (s.Code, s.Name, s.SortOrder, s.SystemCode, s.IsDefault);
+
 MERGE lkp.DefaultExpenseCategory AS t
 USING (VALUES
     (N'TRAVEL',   N'Travel',                 10, NULL,     NULL,   0),
@@ -383,6 +437,41 @@ ON t.Code = s.Code
 WHEN MATCHED THEN UPDATE SET Name = s.Name, Description = s.Description, SortOrder = s.SortOrder
 WHEN NOT MATCHED THEN INSERT (Code, Name, Description, SortOrder) VALUES (s.Code, s.Name, s.Description, s.SortOrder);
 
+------------------------------------------------------------------ Project setup checks
+MERGE admin.ProjectSetupCheck AS t
+USING (VALUES
+    ('TEAM',                   N'Team',                   N'At least one person is on the project team.', N'Add at least one person to the project team.', 'ALL', 'BLOCK', 10),
+    ('RATE',                   N'Rate',                   N'Hourly and not-to-exceed projects have a default rate or a project rate.', N'Set a default rate or add a project rate.', 'HOURLY,NTE', 'BLOCK', 20),
+    ('BUDGET',                 N'Budget',                 N'Hourly projects have budget hours or a budget amount.', N'Set budget hours or a budget amount.', 'HOURLY', 'BLOCK', 30),
+    ('FEE',                    N'Fee',                    N'Fixed-fee and retainer projects have their fee.', N'Set the project fee.', 'FIXED,RETAINER', 'BLOCK', 40),
+    ('MILESTONES',             N'Billing schedule',       N'Fixed-fee projects have a billing schedule that adds up to the fee. Blocking means DATE or MANUAL milestones come first; TASK milestones can be added once tasks exist.', N'Add a billing schedule so the fee can be invoiced.', 'FIXED', 'WARN', 50),
+    ('PROJECT_MANAGER',        N'Project manager',        N'A project manager is assigned.', N'Assign a project manager.', 'ALL', 'OFF', 60),
+    ('START_DATE',             N'Start date',             N'The project has a start date.', N'Set a start date.', 'ALL', 'OFF', 70),
+    ('END_DATE',               N'End date',               N'The project has an end date.', N'Set an end date.', 'ALL', 'OFF', 80),
+    ('PO_NUMBER',              N'PO number',              N'The project has the client''s PO number.', N'Enter the PO number.', 'ALL', 'OFF', 90),
+    ('BILLING_CONTACT',        N'Billing contact',        N'The project''s billing profile has a billing contact.', N'Add a billing contact to the billing profile.', 'HOURLY,NTE,FIXED,RETAINER', 'OFF', 100),
+    ('REQUIRED_CUSTOM_FIELDS', N'Required custom fields', N'Every required project custom field is filled in.', N'Fill in the required custom fields.', 'ALL', 'OFF', 110)
+) AS s (Code, Name, Description, Message, AppliesTo, DefaultLevel, SortOrder)
+ON t.Code = s.Code
+WHEN MATCHED THEN UPDATE SET Name = s.Name, Description = s.Description, Message = s.Message, AppliesTo = s.AppliesTo,
+    DefaultLevel = s.DefaultLevel, SortOrder = s.SortOrder
+WHEN NOT MATCHED THEN INSERT (Code, Name, Description, Message, AppliesTo, DefaultLevel, SortOrder)
+    VALUES (s.Code, s.Name, s.Description, s.Message, s.AppliesTo, s.DefaultLevel, s.SortOrder);
+
+-- Project.RequireBudget (handoff 16) became the BUDGET check: carry a tenant's "off" over, then retire the setting
+IF EXISTS (SELECT 1 FROM admin.SettingDefinition WHERE SettingKey = 'Project.RequireBudget')
+BEGIN
+    INSERT INTO admin.TenantProjectSetupCheck (TenantId, CheckCode, Level)
+    SELECT s.TenantId, 'BUDGET', 'OFF' FROM admin.TenantSetting AS s
+    WHERE s.SettingKey = 'Project.RequireBudget' AND s.Value = N'0'
+      AND NOT EXISTS (SELECT 1 FROM admin.TenantProjectSetupCheck AS x WHERE x.TenantId = s.TenantId AND x.CheckCode = 'BUDGET');
+    DELETE FROM admin.UserSetting WHERE SettingKey = 'Project.RequireBudget';
+    DELETE FROM admin.TenantSetting WHERE SettingKey = 'Project.RequireBudget';
+    DELETE FROM admin.TenantTypeSettingDefault WHERE SettingKey = 'Project.RequireBudget';
+    DELETE FROM admin.PlanSettingDefault WHERE SettingKey = 'Project.RequireBudget';
+    DELETE FROM admin.SettingDefinition WHERE SettingKey = 'Project.RequireBudget';
+END;
+
 MERGE admin.SettingDefinition AS t
 USING (VALUES
     -- key,                          category,    display name,                    description,                                                        type,      default, allowed,                     visibility,      user override, sort
@@ -393,18 +482,34 @@ USING (VALUES
     ('AP.RequireApproval',           N'Payables',  N'Require bill approval',        N'Submitted bills and expense reports wait for approval. Off: submitting approves them.', 'BIT', N'1', NULL, 'TENANT_EDIT', 1, 10),
     ('Feature.ExpenseReports',       N'Platform',  N'Expense reports',              N'Users can submit their own expenses for reimbursement.', 'BIT', N'0', NULL, 'PLATFORM_ONLY', 0, 30),
     ('TimeEntry.RoundingMinutes',    N'Time',     N'Round time entries up to',     N'Minutes, for EXACT and START_END entry only; 0 = no rounding.',   'INT',     N'0',    N'["0","6","15","30"]',     'TENANT_EDIT',   0, 20),
-    ('Tenant.MaxUsers',              N'Account',  N'User limit',                   N'Users allowed on the plan. NULL = unlimited.',                    'INT',     NULL,    NULL,                        'TENANT_READ',   0, 10),
+    ('Tenant.MaxUsers',              N'Account',  N'User limit',                   N'Hard cap on logins that Pillar sets for a tenant. NULL = none: logins past the plan''s included seats are billed as extra seats.', 'INT', NULL, NULL, 'TENANT_READ', 0, 10),
     ('Platform.FeeRateOverride',     N'Platform', N'Fee rate override',            N'Replaces Plan.FeeRate for this tenant, e.g. 0.02 = 2%. NULL = plan rate (2.5%).', 'DECIMAL', NULL, NULL,                 'PLATFORM_ONLY', 0, 10),
     ('Platform.FeeCapOverride',      N'Platform', N'Fee cap per invoice',          N'Replaces Plan.PerInvoiceCap for this tenant (max fee on one invoice). NULL = plan cap.', 'DECIMAL', NULL, NULL,             'PLATFORM_ONLY', 0, 12),
     ('Platform.MonthlyMinimumOverride', N'Platform', N'Monthly minimum fee',       N'Replaces Plan.MonthlyMinimum on the monthly platform statement. NULL = plan minimum.', 'DECIMAL', NULL, NULL,          'PLATFORM_ONLY', 0, 14),
     ('Feature.CustomInvoiceLayouts', N'Platform', N'Custom invoice layouts',       N'Paid custom development: tenant may use custom RDL layouts.',     'BIT',     N'0',    NULL,                        'PLATFORM_ONLY', 0, 20),
     ('Feature.Pilo',                 N'Platform', N'Pilo',                         N'All Pilo AI features (Ask Pilo, Polish with Pilo). On for the AI plans.', 'BIT', N'0', NULL,                     'PLATFORM_ONLY', 0, 40),
-    ('Feature.ExtendedBranding',     N'Platform', N'Extended branding',            N'In-app logo and accent theme. On for AI Powered Plus and Enterprise.', 'BIT', N'0', NULL,                       'PLATFORM_ONLY', 0, 50),
+    ('Feature.ExtendedBranding',     N'Platform', N'Extended branding',            N'In-app logo, colors and sign-in page branding. Enterprise only.', 'BIT', N'0', NULL,                       'PLATFORM_ONLY', 0, 50),
     ('TimeEntry.NoteRequired',       N'Time',     N'Require a description',        N'Every time entry needs a description before it is saved or submitted.', 'BIT', N'1', NULL,                     'TENANT_EDIT',   0, 25),
     ('Timesheet.LockOnSubmit',       N'Time',     N'Lock submitted weeks',         N'A submitted week is read-only for the person who entered it until it is sent back.', 'BIT', N'1', NULL,        'TENANT_EDIT',   0, 30),
     ('Timesheet.AllowResubmit',      N'Time',     N'Allow adding to submitted weeks', N'People may add time to a submitted (not yet approved) week and submit again.', 'BIT', N'1', NULL,          'TENANT_EDIT',   0, 35),
     ('Timesheet.WeekStartDay',       N'Time',     N'Week starts on',               N'First day of a timesheet week: 1 = Monday ... 7 = Sunday. Applies to weeks created after a change.', 'INT', N'1', N'["1","2","3","4","5","6","7"]', 'TENANT_EDIT', 0, 40),
-    ('Dashboard.MembersSeeMoney',    N'Dashboard', N'Members see money',           N'Members see amounts and money widgets on Today. Off: hours only.', 'BIT', N'0', NULL,                        'TENANT_EDIT',   0, 10)
+    ('Dashboard.MembersSeeMoney',    N'Dashboard', N'Members see money',           N'Members see amounts and money widgets on Today. Off: hours only.', 'BIT', N'0', NULL,                        'TENANT_EDIT',   0, 10),
+    ('Project.BudgetAlertPercents',  N'Projects', N'Budget alerts at',             N'Comma-separated percents of budget that notify the project manager, e.g. 80,100. A project can override it.', 'STRING', N'80,100', NULL, 'TENANT_EDIT', 0, 20),
+    ('Pilo.SavedReportsPerUser',     N'Platform', N'Saved AI reports per person',  N'How many Pilo reports each person can save. Plan-derived: 5 / 10 / 25.', 'INT', N'0', NULL,                'PLATFORM_ONLY', 0, 42),
+    ('Pilo.CompanyReports',          N'Platform', N'Company AI reports',           N'How many Pilo reports the company can share. Plan-derived: 50 on Enterprise, 0 below.', 'INT', N'0', NULL,   'PLATFORM_ONLY', 0, 44),
+    ('Pilo.WritingStyle',            N'Pilo',     N'Pilo writing style',           N'How Polish with Pilo rewrites notes. A person can pick their own.', 'STRING', N'PLAIN', N'["PLAIN","FRIENDLY","FORMAL","CONCISE"]', 'TENANT_EDIT', 1, 10),
+    ('Security.RequireMfa',          N'Security', N'Require two-step sign-in',     N'Everyone must set up an authenticator app; sign-in asks them to enroll first.', 'BIT', N'0', NULL, 'TENANT_EDIT', 0, 10),
+    ('Security.PasswordMinLength',   N'Security', N'Minimum password length',      N'Characters a new password needs.', 'INT', N'10', N'["8","10","12","14","16"]', 'TENANT_EDIT', 0, 20),
+    ('Security.PasswordRequireMixed',N'Security', N'Require mixed characters',     N'New passwords need upper and lower case letters and a number or symbol.', 'BIT', N'0', NULL, 'TENANT_EDIT', 0, 30),
+    ('Security.SessionTimeoutMinutes', N'Security', N'Sign out after idle',        N'Minutes without activity before sign-in is needed again; 0 = never.', 'INT', N'480', N'["0","15","30","60","240","480","1440"]', 'TENANT_EDIT', 0, 40),
+    ('Security.MaxSessionDays',      N'Security', N'Longest session',              N'Days a sign-in lasts at most, even when active.', 'INT', N'30', N'["1","7","14","30","90"]', 'TENANT_EDIT', 0, 50),
+    ('Billing.StatementEmail',       N'Billing',  N'Send Pillar statements to',    N'Email address for the monthly Pillar statement. Empty = the account owners.', 'STRING', NULL, NULL, 'TENANT_EDIT', 0, 10),
+    ('Pilo.OverageCapAmount',        N'Billing',  N'Pilo overage cap',             N'Most the company pays a month for Pilo reports past the plan''s allowance; Pilo reports stop at the cap. Empty = no cap.', 'DECIMAL', NULL, NULL, 'TENANT_EDIT', 0, 20),
+    ('Seats.IncludedOverride',       N'Platform', N'Included seats',               N'Replaces Plan.IncludedSeats for this tenant (custom quote). NULL = plan seats.', 'INT', NULL, NULL, 'PLATFORM_ONLY', 0, 60),
+    ('Seats.ExtraPriceOverride',     N'Platform', N'Extra seat price',             N'Replaces Plan.ExtraSeatPrice for this tenant (custom quote). NULL = plan price.', 'DECIMAL', NULL, NULL, 'PLATFORM_ONLY', 0, 62),
+    ('Pilo.MonthlyReportsOverride',  N'Platform', N'Pilo reports a month',         N'Replaces Plan.IncludedAiReports for this tenant. NULL = plan allowance.', 'INT', NULL, NULL, 'PLATFORM_ONLY', 0, 64),
+    ('Time.WeeklyHoursGoal',         N'Time',     N'Weekly hours goal',            N'Hours a person aims to log each week, shown on Today. A person can have their own goal.', 'DECIMAL', N'40', NULL, 'TENANT_EDIT', 1, 50),
+    ('Pilo.ReceiptsCountTowardQuota', N'Platform', N'Receipt reads count as Pilo reports', N'On: each Pilo receipt read counts toward the monthly Pilo report allowance. Off (default): fair use, like Polish with Pilo.', 'BIT', N'0', NULL, 'PLATFORM_ONLY', 0, 66)
 ) AS s (SettingKey, Category, DisplayName, Description, DataType, DefaultValue, AllowedValues, Visibility, AllowUserOverride, SortOrder)
 ON t.SettingKey = s.SettingKey
 WHEN MATCHED THEN UPDATE SET Category = s.Category, DisplayName = s.DisplayName, Description = s.Description, DataType = s.DataType,
@@ -426,15 +531,22 @@ ON t.TenantTypeId = s.TenantTypeId AND t.SettingKey = s.SettingKey
 WHEN MATCHED THEN UPDATE SET Value = s.Value
 WHEN NOT MATCHED THEN INSERT (TenantTypeId, SettingKey, Value) VALUES (s.TenantTypeId, s.SettingKey, s.Value);
 
+-- Extended branding is Enterprise only (Steve 2026-10-21)
+DELETE d FROM admin.PlanSettingDefault AS d JOIN admin.[Plan] AS p ON p.Id = d.PlanId
+WHERE p.Code = 'AI_PLUS' AND d.SettingKey = 'Feature.ExtendedBranding';
+
 MERGE admin.PlanSettingDefault AS t
 USING (
     SELECT p.Id AS PlanId, v.SettingKey, v.Value
     FROM (VALUES
         ('AI_POWERED', 'Feature.Pilo',             N'1'),
         ('AI_PLUS',    'Feature.Pilo',             N'1'),
-        ('AI_PLUS',    'Feature.ExtendedBranding', N'1'),
         ('ENTERPRISE', 'Feature.Pilo',             N'1'),
-        ('ENTERPRISE', 'Feature.ExtendedBranding', N'1')
+        ('ENTERPRISE', 'Feature.ExtendedBranding', N'1'),
+        ('AI_POWERED', 'Pilo.SavedReportsPerUser', N'5'),
+        ('AI_PLUS',    'Pilo.SavedReportsPerUser', N'10'),
+        ('ENTERPRISE', 'Pilo.SavedReportsPerUser', N'25'),
+        ('ENTERPRISE', 'Pilo.CompanyReports',      N'50')
     ) AS v (PlanCode, SettingKey, Value)
     JOIN admin.[Plan] AS p ON p.Code = v.PlanCode
 ) AS s
@@ -443,38 +555,81 @@ WHEN MATCHED THEN UPDATE SET Value = s.Value
 WHEN NOT MATCHED THEN INSERT (PlanId, SettingKey, Value) VALUES (s.PlanId, s.SettingKey, s.Value);
 
 ------------------------------------------------------------------ Users and roles
-MERGE sec.Permission AS t
+-- grid headers; add a row here and it appears in Settings > Roles
+MERGE sec.PermissionCategory AS t
 USING (VALUES
-    ('client.view', N'Clients', N'View clients and contacts', 10),
-    ('client.edit', N'Clients', N'Add and edit clients, contacts and billing profiles', 20),
-    ('project.view', N'Projects', N'View projects and tasks', 30),
-    ('project.edit', N'Projects', N'Add and edit projects', 40),
-    ('project.members', N'Projects', N'Assign people to projects', 50),
-    ('project.rates', N'Projects', N'Set project and person rates', 60),
-    ('task.edit', N'Projects', N'Add and edit tasks, comments and attachments', 70),
-    ('time.enter', N'Time', N'Enter and submit own time', 80),
-    ('time.enter_others', N'Time', N'Enter and submit time for other people', 90),
-    ('time.view_all', N'Time', N'See everyone''s time', 100),
-    ('time.approve', N'Time', N'Approve and reject time', 110),
-    ('invoice.view', N'Invoicing', N'View invoices', 120),
-    ('invoice.run', N'Invoicing', N'Run invoice batches and edit drafts', 130),
-    ('invoice.issue', N'Invoicing', N'Issue invoices', 140),
-    ('invoice.void', N'Invoicing', N'Void issued invoices', 150),
-    ('payment.record', N'Receivables', N'Record and apply client payments', 160),
-    ('payment.void', N'Receivables', N'Void payments, issue credit memos and refunds', 170),
-    ('ap.view', N'Payables', N'View vendors and bills', 180),
-    ('ap.enter', N'Payables', N'Add vendors and enter bills', 190),
-    ('ap.approve', N'Payables', N'Approve bills and expense reports', 200),
-    ('ap.pay', N'Payables', N'Record bill payments', 210),
-    ('expense.submit', N'Payables', N'Submit own expense reports', 220),
-    ('report.financial', N'Reports', N'See financial reports (AR, AP, revenue, margin)', 230),
-    ('settings.edit', N'Administration', N'Change account settings, branding, layouts and remit-to', 240),
-    ('users.manage', N'Administration', N'Invite, edit and disable users', 250),
-    ('billing.manage', N'Administration', N'Manage the Pillar subscription, card on file and statements', 260)
-) AS s (Code, Category, Name, SortOrder)
+    ('CLIENTS',        N'Clients',            N'Clients, contacts and billing profiles.', 10),
+    ('PROJECTS',       N'Projects',           N'Projects, team and rates.', 20),
+    ('TASKS',          N'Tasks',              N'Tasks, comments, checklists and attachments.', 30),
+    ('TIME',           N'Time',               N'Time entry, timesheets and approval.', 40),
+    ('EXPENSES',       N'Expenses',           N'Expense reports people submit for reimbursement.', 50),
+    ('INVOICING',      N'Invoicing',          N'Invoice runs, drafts, issuing and voids.', 60),
+    ('PAYMENTS',       N'Payments',           N'Client payments, credit memos and refunds.', 70),
+    ('BILLS',          N'Bills & vendors',    N'Vendors, bills, approval and bill payments.', 80),
+    ('REPORTS',        N'Reports & Pilo',     N'Canned reports and Pilo AI reports.', 90),
+    ('SETTINGS',       N'Settings',           N'Account settings, branding, email and layouts.', 100),
+    ('USERS',          N'Users & security',   N'People, roles and permissions.', 110),
+    ('PILLAR_BILLING', N'Pillar billing',     N'The Pillar subscription, card on file and statements.', 120)
+) AS s (Code, Name, Description, SortOrder)
 ON t.Code = s.Code
-WHEN MATCHED THEN UPDATE SET Category = s.Category, Name = s.Name, SortOrder = s.SortOrder
-WHEN NOT MATCHED THEN INSERT (Code, Category, Name, SortOrder) VALUES (s.Code, s.Category, s.Name, s.SortOrder);
+WHEN MATCHED THEN UPDATE SET Name = s.Name, Description = s.Description, SortOrder = s.SortOrder
+WHEN NOT MATCHED THEN INSERT (Code, Name, Description, SortOrder) VALUES (s.Code, s.Name, s.Description, s.SortOrder);
+
+-- The permission catalog. To retire one, set IsActive = 0 here (keep the row: grants stay but stop counting).
+-- New rows reach system roles through sec.DefaultRolePermission; roles a tenant customized get them OFF.
+MERGE sec.Permission AS t
+USING (
+    SELECT v.Code, v.CategoryCode, c.Name AS Category, v.Name, v.Description, v.SortOrder, v.IsActive
+    FROM (VALUES
+    ('client.view',       'CLIENTS',        N'View clients',            N'See clients, contacts, notes and billing profiles.', 10, 1),
+    ('client.edit',       'CLIENTS',        N'Edit clients',            N'Add and edit clients, contacts and billing profiles.', 20, 1),
+    ('project.view',      'PROJECTS',       N'View projects',           N'See projects and their tasks.', 30, 1),
+    ('project.edit',      'PROJECTS',       N'Edit projects',           N'Add and edit projects, budgets and milestones.', 40, 1),
+    ('project.members',   'PROJECTS',       N'Assign people',           N'Add and remove people on a project.', 50, 1),
+    ('project.rates',     'PROJECTS',       N'Set rates',               N'Set project and per-person billing rates.', 60, 1),
+    ('task.create',       'TASKS',          N'Create tasks',            N'Add tasks to projects.', 70, 1),
+    ('task.edit',         'TASKS',          N'Edit tasks',              N'Edit tasks, checklists, comments and attachments.', 75, 1),
+    ('time.enter',        'TIME',           N'Enter own time',          N'Log and submit your own time.', 80, 1),
+    ('time.enter_others', 'TIME',           N'Enter time for others',   N'Log and submit time on behalf of other people.', 90, 1),
+    ('time.view_all',     'TIME',           N'See everyone''s time',    N'See time and timesheets for everyone, not just your own.', 100, 1),
+    ('time.approve',      'TIME',           N'Approve time',            N'Approve, send back and correct timesheets.', 110, 1),
+    ('expense.submit',    'EXPENSES',       N'Submit expenses',         N'Submit your own expense reports for reimbursement.', 115, 1),
+    ('invoice.view',      'INVOICING',      N'View invoices',           N'See draft and issued invoices.', 120, 1),
+    ('invoice.run',       'INVOICING',      N'Run invoices',            N'Run invoice batches and edit drafts.', 130, 1),
+    ('invoice.issue',     'INVOICING',      N'Issue invoices',          N'Issue invoices (assigns the number) and email them.', 140, 1),
+    ('invoice.void',      'INVOICING',      N'Void invoices',           N'Void issued invoices that have no payments.', 150, 1),
+    ('payment.record',    'PAYMENTS',       N'Record payments',         N'Record client payments and apply them to invoices.', 160, 1),
+    ('payment.void',      'PAYMENTS',       N'Void payments and refund', N'Void payments, issue credit memos and refunds.', 170, 1),
+    ('ap.view',           'BILLS',          N'View bills',              N'See vendors and bills.', 180, 1),
+    ('ap.enter',          'BILLS',          N'Enter bills',             N'Add vendors and enter bills.', 190, 1),
+    ('ap.approve',        'BILLS',          N'Approve bills',           N'Approve bills and expense reports.', 200, 1),
+    ('ap.pay',            'BILLS',          N'Pay bills',               N'Record bill payments.', 210, 1),
+    ('report.financial',  'REPORTS',        N'Financial reports',       N'See AR, AP, revenue and margin reports.', 230, 1),
+    ('report.share',      'REPORTS',        N'Share Pilo reports',      N'Save Pilo reports for the whole company and manage them.', 235, 1),
+    ('settings.edit',     'SETTINGS',       N'Change settings (retired)', N'Replaced by one permission per settings page in handoff 21.', 240, 0),
+    ('settings.company',  'SETTINGS',       N'Company',                 N'Company details, time zone, remit-to and dashboard options.', 241, 1),
+    ('settings.lists',    'SETTINGS',       N'Lists',                   N'Edit lookup lists: client types, task types, expense categories and the rest.', 242, 1),
+    ('settings.time',     'SETTINGS',       N'Time',                    N'Time entry method, rounding, approval and timesheet rules.', 243, 1),
+    ('settings.projects', 'SETTINGS',       N'Projects',                N'Project setup checks, budget alerts and project defaults.', 244, 1),
+    ('settings.invoicing','SETTINGS',       N'Invoicing',               N'Invoice creation, tax, layouts and bill approval rules.', 245, 1),
+    ('settings.email',    'SETTINGS',       N'Email',                   N'Outgoing mail server and email templates.', 246, 1),
+    ('settings.branding', 'SETTINGS',       N'Branding',                N'Logo, colors and sign-in page branding.', 247, 1),
+    ('settings.integrations','SETTINGS',    N'Integrations',            N'Connect other apps.', 248, 1),
+    ('settings.pilo',     'SETTINGS',       N'Pilo',                    N'Pilo AI options for the company.', 249, 1),
+    ('settings.security', 'SETTINGS',       N'Security',                N'Require MFA, password rules and session timeouts.', 250, 1),
+    ('settings.custom_fields','SETTINGS',   N'Custom fields',           N'Add and arrange custom fields on records.', 251, 1),
+    ('settings.notifications','SETTINGS',   N'Notification defaults',   N'Company defaults for notifications, and which ones people can''t turn off.', 252, 1),
+    ('settings.audit',    'SETTINGS',       N'Audit log',               N'View the log of every admin change.', 253, 1),
+    ('users.manage',      'USERS',          N'Manage users and roles',  N'Invite, edit and disable people; edit roles and permissions.', 250, 1),
+    ('billing.manage',    'PILLAR_BILLING', N'Manage Pillar billing',   N'Manage the Pillar subscription, card on file and statements.', 260, 1)
+    ) AS v (Code, CategoryCode, Name, Description, SortOrder, IsActive)
+    JOIN sec.PermissionCategory AS c ON c.Code = v.CategoryCode
+) AS s
+ON t.Code = s.Code
+WHEN MATCHED THEN UPDATE SET CategoryCode = s.CategoryCode, Category = s.Category, Name = s.Name, Description = s.Description,
+    SortOrder = s.SortOrder, IsActive = s.IsActive
+WHEN NOT MATCHED THEN INSERT (Code, CategoryCode, Category, Name, Description, SortOrder, IsActive)
+    VALUES (s.Code, s.CategoryCode, s.Category, s.Name, s.Description, s.SortOrder, s.IsActive);
 
 MERGE sec.DefaultRole AS t
 USING (VALUES
@@ -498,6 +653,7 @@ USING (VALUES
     ('ADMIN', 'project.edit'),
     ('ADMIN', 'project.members'),
     ('ADMIN', 'project.rates'),
+    ('ADMIN', 'task.create'),
     ('ADMIN', 'task.edit'),
     ('ADMIN', 'time.enter'),
     ('ADMIN', 'time.enter_others'),
@@ -515,17 +671,32 @@ USING (VALUES
     ('ADMIN', 'ap.pay'),
     ('ADMIN', 'expense.submit'),
     ('ADMIN', 'report.financial'),
-    ('ADMIN', 'settings.edit'),
+    ('ADMIN', 'report.share'),
+    ('ADMIN', 'settings.company'),
+    ('ADMIN', 'settings.lists'),
+    ('ADMIN', 'settings.time'),
+    ('ADMIN', 'settings.projects'),
+    ('ADMIN', 'settings.invoicing'),
+    ('ADMIN', 'settings.email'),
+    ('ADMIN', 'settings.branding'),
+    ('ADMIN', 'settings.integrations'),
+    ('ADMIN', 'settings.pilo'),
+    ('ADMIN', 'settings.security'),
+    ('ADMIN', 'settings.custom_fields'),
+    ('ADMIN', 'settings.notifications'),
+    ('ADMIN', 'settings.audit'),
     ('ADMIN', 'users.manage'),
     ('MANAGER', 'client.view'),
     ('MANAGER', 'project.view'),
     ('MANAGER', 'project.edit'),
     ('MANAGER', 'project.members'),
+    ('MANAGER', 'task.create'),
     ('MANAGER', 'task.edit'),
     ('MANAGER', 'time.enter'),
     ('MANAGER', 'time.enter_others'),
     ('MANAGER', 'time.view_all'),
     ('MANAGER', 'time.approve'),
+    ('MANAGER', 'report.share'),
     ('MANAGER', 'invoice.view'),
     ('MANAGER', 'expense.submit'),
     ('BILLING', 'client.view'),
@@ -555,6 +726,73 @@ USING (VALUES
 ON t.RoleCode = s.RoleCode AND t.PermissionCode = s.PermissionCode
 WHEN NOT MATCHED BY TARGET THEN INSERT (RoleCode, PermissionCode) VALUES (s.RoleCode, s.PermissionCode)
 WHEN NOT MATCHED BY SOURCE THEN DELETE;
+
+-- handoff 21, one time: whoever held settings.edit gets every per-page settings permission, then the old grant goes.
+-- Runs only while settings.edit grants remain, so later changes to the new permissions are never undone.
+INSERT INTO sec.RolePermission (TenantId, RoleId, PermissionCode)
+SELECT rp.TenantId, rp.RoleId, p.Code
+FROM sec.RolePermission AS rp
+JOIN sec.Permission AS p ON p.Code LIKE 'settings.%' AND p.Code <> 'settings.edit' AND p.IsActive = 1
+WHERE rp.PermissionCode = 'settings.edit'
+  AND NOT EXISTS (SELECT 1 FROM sec.RolePermission AS x WHERE x.TenantId = rp.TenantId AND x.RoleId = rp.RoleId AND x.PermissionCode = p.Code);
+DELETE FROM sec.RolePermission WHERE PermissionCode = 'settings.edit';
+
+-- which settings page guards each setting (admin.usp_Setting_Set); Platform settings stay Pillar-only
+UPDATE d SET PermissionCode = m.PermissionCode
+FROM admin.SettingDefinition AS d
+LEFT JOIN (VALUES
+    (N'Time', 'settings.time'), (N'Projects', 'settings.projects'), (N'Invoicing', 'settings.invoicing'),
+    (N'Payables', 'settings.invoicing'), (N'Account', 'settings.company'), (N'Dashboard', 'settings.company'),
+    (N'Pilo', 'settings.pilo'), (N'Security', 'settings.security'), (N'Billing', 'billing.manage')
+) AS m (Category, PermissionCode) ON m.Category = d.Category
+WHERE EXISTS (SELECT d.PermissionCode EXCEPT SELECT m.PermissionCode);
+
+------------------------------------------------------------------ Notification types
+MERGE sec.NotificationType AS t
+USING (VALUES
+    -- code,                         name,                            description,                                                   category,  in-app, email, sort, quick action
+    ('BUDGET_THRESHOLD',             N'Budget alert',                 N'A project I manage, or a project for my client, crosses a budget alert percent.', N'Projects', 1, 0, 10, NULL),
+    ('PROJECT_CREATED_ON_MY_CLIENT', N'New project on my client',     N'Someone adds a project to a client I am the account manager for.', N'Projects', 1, 0, 20, NULL),
+    ('TASK_CREATED_ON_MY_PROJECT',   N'New task on my project',       N'Someone adds a task to a project I manage.', N'Tasks', 0, 0, 30, NULL),
+    ('TASK_ASSIGNED_TO_ME',          N'Task assigned to me',          N'Someone assigns me a task.', N'Tasks', 1, 0, 40, NULL),
+    ('MENTIONED',                    N'Mentions',                     N'Someone @mentions me in a task comment or client note.', N'Tasks', 1, 0, 50, 'REPLY'),
+    ('WATCHED_TASK_CHANGED',         N'Tasks I follow',               N'A task I follow gets a comment or changes status.', N'Tasks', 1, 0, 60, NULL),
+    ('TIMESHEET_SUBMITTED',          N'Timesheet submitted',          N'A timesheet is waiting for my approval.', N'Time', 1, 0, 70, 'APPROVE_TIMESHEET'),
+    ('TIMESHEET_REJECTED',           N'Timesheet sent back',          N'My timesheet was sent back.', N'Time', 1, 0, 80, NULL),
+    ('TIMESHEET_DUE',                N'Timesheet reminder',           N'My week is ending and my timesheet isn''t submitted yet.', N'Time', 1, 0, 85, NULL),
+    ('INVOICE_PAID',                 N'Invoice paid',                 N'A client pays an invoice for a client I manage.', N'Billing', 0, 0, 90, NULL),
+    ('INVOICE_OVERDUE',              N'Invoice overdue',              N'An invoice for a client I manage is past due.', N'Billing', 1, 0, 95, NULL),
+    ('BILL_AWAITING_APPROVAL',       N'Bill awaiting approval',       N'A bill or expense report is waiting for my approval.', N'Billing', 1, 0, 100, NULL),
+    ('PILO_USAGE_NEAR_LIMIT',        N'Pilo usage near limit',        N'The company has used most of this month''s Pilo reports.', N'Account', 1, 0, 110, NULL),
+    ('PLAN_PAYMENT_FAILED',          N'Pillar payment failed',        N'The card on file was declined for the Pillar statement.', N'Account', 1, 1, 120, NULL),
+    ('SUPPORT_REPLY',                N'Support replies',              N'Pillar support answers a ticket I opened.', N'Account', 1, 1, 130, NULL)
+) AS s (Code, Name, Description, Category, DefaultOn, DefaultEmailOn, SortOrder, ActionKind)
+ON t.Code = s.Code
+WHEN MATCHED THEN UPDATE SET Name = s.Name, Description = s.Description, Category = s.Category, DefaultOn = s.DefaultOn,
+    DefaultEmailOn = s.DefaultEmailOn, SortOrder = s.SortOrder, ActionKind = s.ActionKind
+WHEN NOT MATCHED THEN INSERT (Code, Name, Description, Category, DefaultOn, DefaultEmailOn, SortOrder, ActionKind)
+    VALUES (s.Code, s.Name, s.Description, s.Category, s.DefaultOn, s.DefaultEmailOn, s.SortOrder, s.ActionKind);
+
+MERGE admin.PiloEmote AS t
+USING (VALUES
+    ('HELLO', N'Hello', 10), ('WAVE', N'Wave', 20), ('THINKING', N'Thinking', 30), ('CELEBRATE', N'Celebrate', 40),
+    ('FOCUSED', N'Focused', 50), ('COFFEE', N'Coffee', 60), ('THUMBS_UP', N'Thumbs up', 70), ('SLEEPY', N'Sleepy', 80)
+) AS s (Code, Name, SortOrder)
+ON t.Code = s.Code
+WHEN MATCHED THEN UPDATE SET Name = s.Name, SortOrder = s.SortOrder
+WHEN NOT MATCHED THEN INSERT (Code, Name, SortOrder) VALUES (s.Code, s.Name, s.SortOrder);
+
+-- handoff 22: logins that already signed in or accepted an invite count as verified (only new sign-ups verify by link)
+UPDATE c SET EmailVerifiedAt = COALESCE(c.LastLoginAt, c.PasswordChangedAt, c.CreatedAt)
+FROM sec.UserCredential AS c
+JOIN admin.Tenant AS t ON t.Id = c.TenantId
+WHERE c.EmailVerifiedAt IS NULL AND c.PasswordHash IS NOT NULL AND t.Status <> 'SETUP';
+
+-- existing tenants get lookup lists added since they signed up (insert-only; tenant edits are kept)
+EXEC lkp.usp_SyncTenantLookups;
+
+-- tenants without an INVOICE email template get the default one
+EXEC admin.usp_SeedTenantEmailTemplates;
 
 -- existing tenants get missing roles and newly granted permissions
 EXEC sec.usp_SeedTenantRoles;

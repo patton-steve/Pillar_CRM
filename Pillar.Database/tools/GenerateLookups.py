@@ -61,6 +61,7 @@ LOOKUPS = [
     ]),
     Lookup("BillStatus", "locked"),
     Lookup("TimesheetStatus", "locked"),
+    Lookup("NoteType", "system"),
 ]
 
 SESSION_USER = "CONVERT(INT, SESSION_CONTEXT(N'UserId'))"

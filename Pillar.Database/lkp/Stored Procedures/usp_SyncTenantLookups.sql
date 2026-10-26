@@ -255,5 +255,17 @@ BEGIN
       -- a tenant custom value may already hold the code; skip rather than fail
       AND NOT EXISTS (SELECT 1 FROM lkp.TimesheetStatus AS x WHERE x.TenantId = t.Id AND x.Code = d.Code);
 
+    INSERT INTO lkp.NoteType (TenantId, Code, Name, SortOrder, IsActive, IsCustom, IsLocked, IsDefault, DefaultId, SystemCode)
+    SELECT t.Id, d.Code, d.Name, d.SortOrder, d.IsActive, 0, d.IsLocked,
+           -- keep a default the tenant already chose
+           CASE WHEN EXISTS (SELECT 1 FROM lkp.NoteType AS x WHERE x.TenantId = t.Id AND x.IsDefault = 1) THEN 0 ELSE d.IsDefault END,
+           d.Id, d.SystemCode
+    FROM admin.Tenant AS t
+    CROSS JOIN lkp.DefaultNoteType AS d
+    WHERE (@TenantId IS NULL OR t.Id = @TenantId)
+      AND NOT EXISTS (SELECT 1 FROM lkp.NoteType AS x WHERE x.TenantId = t.Id AND x.DefaultId = d.Id)
+      -- a tenant custom value may already hold the code; skip rather than fail
+      AND NOT EXISTS (SELECT 1 FROM lkp.NoteType AS x WHERE x.TenantId = t.Id AND x.Code = d.Code);
+
     COMMIT;
 END;

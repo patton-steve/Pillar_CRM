@@ -1,6 +1,9 @@
 -- Sets (or clears, with @Value = NULL and @Clear = 1) a tenant or user setting.
 -- Tenants may only change TENANT_EDIT settings; TENANT_READ and PLATFORM_ONLY need IsPlatformAdmin.
 -- Validates the value against DataType and AllowedValues.
+-- Who may change it (handoff 21): a tenant value needs the setting's page permission (SettingDefinition.PermissionCode,
+-- e.g. settings.time); a per-user override may be set by that user or by someone with the page permission. Pillar staff
+-- (IsPlatformAdmin) and calls without a user in session (sign-up, seeds) skip the check. Tenant-value changes are audited.
 CREATE PROCEDURE admin.usp_Setting_Set
     @TenantId       INT,
     @SettingKey     VARCHAR(100),
@@ -12,15 +15,21 @@ BEGIN
     SET NOCOUNT ON;
     SET XACT_ABORT ON;
 
-    DECLARE @DataType VARCHAR(10), @Visibility VARCHAR(15), @AllowUser BIT, @Allowed NVARCHAR(1000),
-            @IsAdmin BIT = ISNULL(CAST(SESSION_CONTEXT(N'IsPlatformAdmin') AS BIT), 0);
+    DECLARE @DataType VARCHAR(10), @Visibility VARCHAR(15), @AllowUser BIT, @Allowed NVARCHAR(1000), @Permission VARCHAR(50),
+            @IsAdmin BIT = ISNULL(CAST(SESSION_CONTEXT(N'IsPlatformAdmin') AS BIT), 0),
+            @Actor INT = CONVERT(INT, SESSION_CONTEXT(N'UserId')), @Category NVARCHAR(50),
+            @OldValue NVARCHAR(400), @AuditChange NVARCHAR(MAX), @AuditSummary NVARCHAR(400), @AuditArea VARCHAR(30);
 
-    SELECT @DataType = DataType, @Visibility = Visibility, @AllowUser = AllowUserOverride, @Allowed = AllowedValues
+    SELECT @DataType = DataType, @Visibility = Visibility, @AllowUser = AllowUserOverride, @Allowed = AllowedValues,
+           @Permission = PermissionCode, @Category = Category
     FROM admin.SettingDefinition WHERE SettingKey = @SettingKey;
 
     IF @DataType IS NULL THROW 50401, N'Unknown setting.', 1;
     IF @Visibility <> 'TENANT_EDIT' AND @IsAdmin = 0 THROW 50402, N'This setting can only be changed by Pillar.', 1;
     IF @AppUserId IS NOT NULL AND @AllowUser = 0 THROW 50403, N'This setting cannot be set per user.', 1;
+    IF @IsAdmin = 0 AND @Actor IS NOT NULL AND (@AppUserId IS NULL OR @AppUserId <> @Actor)
+       AND (@Permission IS NULL OR NOT EXISTS (SELECT 1 FROM sec.fn_UserHasPermission(@TenantId, @Actor, @Permission)))
+        THROW 50406, N'You don''t have permission to change this setting.', 1;
 
     IF @Clear = 0 AND @Value IS NOT NULL
     BEGIN
@@ -36,6 +45,13 @@ BEGIN
 
     IF @AppUserId IS NULL
     BEGIN
+        SELECT @OldValue = Value FROM admin.TenantSetting WHERE TenantId = @TenantId AND SettingKey = @SettingKey;
+        SELECT @AuditChange = (SELECT N'Value' AS field, @OldValue AS [from], IIF(@Clear = 1, NULL, @Value) AS [to]
+                               FOR JSON PATH, INCLUDE_NULL_VALUES),
+               @AuditSummary = CONCAT(IIF(@Clear = 1, N'Reset ', N'Changed '), @SettingKey),
+               @AuditArea = ISNULL(REPLACE(@Permission, 'settings.', ''), 'company');
+        EXEC admin.usp_Audit_Write @Area = @AuditArea, @EntityType = 'SETTING', @EntityKey = @SettingKey,
+             @Action = 'UPDATE', @Summary = @AuditSummary, @ChangeJson = @AuditChange, @TenantId = @TenantId;
         IF @Clear = 1
             DELETE FROM admin.TenantSetting WHERE TenantId = @TenantId AND SettingKey = @SettingKey;
         ELSE

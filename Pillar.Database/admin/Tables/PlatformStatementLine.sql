@@ -1,6 +1,8 @@
 -- Lines on a platform statement. FEE and REVERSAL lines point at their admin.PlatformFee row and snapshot the client invoice
 -- (number, client, date) so the statement reads the same forever. MINIMUM tops the month up to the monthly minimum;
 -- CREDIT carries a negative balance forward from the prior statement.
+-- Handoff 22: PLAN is the plan price (Quantity = days, prorated on a mid-month upgrade), SEATS the extra seats over the plan's
+-- included seats at the month's peak (Quantity = extra seats), PILO the Pilo reports over the plan's allowance (Quantity = reports).
 CREATE TABLE admin.PlatformStatementLine
 (
     Id                  INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_PlatformStatementLine PRIMARY KEY CLUSTERED,
@@ -17,8 +19,11 @@ CREATE TABLE admin.PlatformStatementLine
     FeeBaseAmount       DECIMAL(19,2)   NULL,
     FeeRate             DECIMAL(9,6)    NULL,
     Amount              DECIMAL(19,2)   NOT NULL,
+    Quantity            DECIMAL(19,2)   NULL,      -- handoff 22: appended
+    UnitPrice           DECIMAL(19,4)   NULL,
     CONSTRAINT UQ_PlatformStatementLine_Statement_Line UNIQUE (TenantId, StatementId, LineNumber),
-    CONSTRAINT CK_PlatformStatementLine_LineType CHECK (LineType IN ('FEE', 'REVERSAL', 'MINIMUM', 'CREDIT')),
+    CONSTRAINT CK_PlatformStatementLine_LineType CHECK (LineType = 'FEE' OR LineType = 'REVERSAL' OR LineType = 'MINIMUM' OR LineType = 'CREDIT'
+        OR LineType = 'PLAN' OR LineType = 'SEATS' OR LineType = 'PILO'),
     CONSTRAINT FK_PlatformStatementLine_Statement FOREIGN KEY (TenantId, StatementId) REFERENCES admin.PlatformStatement (TenantId, Id),
     CONSTRAINT FK_PlatformStatementLine_Fee FOREIGN KEY (PlatformFeeId) REFERENCES admin.PlatformFee (Id)
 );

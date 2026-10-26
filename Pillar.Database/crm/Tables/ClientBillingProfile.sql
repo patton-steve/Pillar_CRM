@@ -28,6 +28,7 @@ CREATE TABLE crm.ClientBillingProfile
     ModifiedAt          DATETIME2(0)    NULL,
     ModifiedBy          INT             NULL,
     RowVer              ROWVERSION      NOT NULL,
+    InvoiceEmailTemplateId INT        NULL,      -- INVOICE email template; NULL = the tenant's default (admin.fn_EmailTemplateFor)
     CONSTRAINT UQ_ClientBillingProfile_PublicId UNIQUE (PublicId),
     CONSTRAINT UQ_ClientBillingProfile_Tenant_Id UNIQUE (TenantId, Id),
     CONSTRAINT UQ_ClientBillingProfile_Tenant_Client_Id UNIQUE (TenantId, ClientId, Id),
@@ -41,7 +42,8 @@ CREATE TABLE crm.ClientBillingProfile
         REFERENCES crm.ClientAddress (TenantId, ClientId, AddressId),
     CONSTRAINT FK_ClientBillingProfile_PaymentTerm FOREIGN KEY (TenantId, PaymentTermId) REFERENCES lkp.PaymentTerm (TenantId, Id),
     CONSTRAINT FK_ClientBillingProfile_InvoiceLayout FOREIGN KEY (TenantId, InvoiceLayoutId) REFERENCES ar.InvoiceLayout (TenantId, Id),
-    CONSTRAINT FK_ClientBillingProfile_RemitProfile FOREIGN KEY (TenantId, RemitProfileId) REFERENCES admin.RemitProfile (TenantId, Id)
+    CONSTRAINT FK_ClientBillingProfile_RemitProfile FOREIGN KEY (TenantId, RemitProfileId) REFERENCES admin.RemitProfile (TenantId, Id),
+    CONSTRAINT FK_ClientBillingProfile_EmailTemplate FOREIGN KEY (TenantId, InvoiceEmailTemplateId) REFERENCES admin.EmailTemplate (TenantId, Id)
 );
 GO
 -- At most one default profile per client; the client insert trigger supplies the first.

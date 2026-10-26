@@ -1,6 +1,6 @@
 -- Reserves @Count consecutive numbers for (@TenantId, @SequenceKey) and returns the first,
 -- plus the first number formatted per the sequence's Prefix / IncludeYear / PadLength.
--- Creates the sequence (unformatted) on first use. Call inside the transaction that uses the number.
+-- Creates the sequence on first use, unformatted except BILL- / EXP- prefixes for 'BILL' and 'EXPENSE'. Call inside the transaction that uses the number.
 -- The year for IncludeYear / YEARLY reset is the tenant's local year.
 CREATE PROCEDURE admin.usp_NextNumber
     @TenantId       INT,
@@ -36,8 +36,10 @@ BEGIN
     IF @@ROWCOUNT = 0
     BEGIN
         -- HOLDLOCK above holds a key-range lock, so a concurrent first caller waits here rather than duplicating.
-        INSERT INTO admin.NumberSequence (TenantId, SequenceKey, NextValue, CurrentYear, ModifiedAt)
-        VALUES (@TenantId, @SequenceKey, 1 + @Count, @Year, SYSUTCDATETIME());
+        -- vendor bills and expense reports share ap.Bill's unique number, so their sequences get distinct prefixes
+        SET @Prefix = CASE @SequenceKey WHEN 'BILL' THEN N'BILL-' WHEN 'EXPENSE' THEN N'EXP-' END;
+        INSERT INTO admin.NumberSequence (TenantId, SequenceKey, Prefix, NextValue, CurrentYear, ModifiedAt)
+        VALUES (@TenantId, @SequenceKey, @Prefix, 1 + @Count, @Year, SYSUTCDATETIME());
         SELECT @FirstValue = 1, @IncludeYear = 0, @Pad = 0;
     END;
 

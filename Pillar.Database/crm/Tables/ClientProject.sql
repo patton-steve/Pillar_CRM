@@ -32,6 +32,7 @@ CREATE TABLE crm.ClientProject
     ModifiedAt              DATETIME2(0)    NULL,
     ModifiedBy              INT             NULL,
     RowVer                  ROWVERSION      NOT NULL,
+    BudgetAlertPercents     VARCHAR(50)     NULL,      -- e.g. '50,90'; NULL = tenant setting Project.BudgetAlertPercents
     CONSTRAINT UQ_ClientProject_PublicId UNIQUE (PublicId),
     CONSTRAINT UQ_ClientProject_Tenant_Id UNIQUE (TenantId, Id),
     CONSTRAINT UQ_ClientProject_Tenant_Client_Id UNIQUE (TenantId, ClientId, Id),
@@ -40,6 +41,7 @@ CREATE TABLE crm.ClientProject
     CONSTRAINT CK_ClientProject_Amounts CHECK (
         (DefaultRate IS NULL OR DefaultRate >= 0) AND (FixedFeeAmount IS NULL OR FixedFeeAmount >= 0)
         AND (BudgetHours IS NULL OR BudgetHours >= 0) AND (BudgetAmount IS NULL OR BudgetAmount >= 0)),
+    CONSTRAINT CK_ClientProject_BudgetAlertPercents CHECK (BudgetAlertPercents NOT LIKE '%[^0-9,]%'),
     CONSTRAINT FK_ClientProject_Client FOREIGN KEY (TenantId, ClientId) REFERENCES crm.Client (TenantId, Id),
     -- profile must belong to this client
     CONSTRAINT FK_ClientProject_BillingProfile FOREIGN KEY (TenantId, ClientId, BillingProfileId)

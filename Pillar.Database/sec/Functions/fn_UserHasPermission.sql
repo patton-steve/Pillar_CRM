@@ -1,4 +1,5 @@
 -- One row (Allowed = 1) when the user is ACTIVE and its role grants @PermissionCode; owners hold every permission.
+-- A retired permission (sec.Permission.IsActive = 0) is held by nobody.
 -- Usage: IF EXISTS (SELECT 1 FROM sec.fn_UserHasPermission(@TenantId, @UserId, 'time.approve')) ...
 CREATE FUNCTION sec.fn_UserHasPermission (@TenantId INT, @AppUserId INT, @PermissionCode VARCHAR(50))
 RETURNS TABLE
@@ -7,6 +8,7 @@ RETURN
     SELECT CAST(1 AS BIT) AS Allowed
     FROM sec.AppUser AS u
     JOIN sec.Role AS r ON r.TenantId = u.TenantId AND r.Id = u.RoleId AND r.IsActive = 1
+    JOIN sec.Permission AS p ON p.Code = @PermissionCode AND p.IsActive = 1
     WHERE u.TenantId = @TenantId AND u.Id = @AppUserId AND u.Status = 'ACTIVE'
       AND (r.IsOwner = 1
            OR EXISTS (SELECT 1 FROM sec.RolePermission AS rp

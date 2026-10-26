@@ -1,6 +1,6 @@
 -- Accepts an invite or completes a password reset (no sign-in needed; the token proves who it is).
 -- Sets the bcrypt hash from the API, clears lockout, marks the token used. INVITE also makes the user ACTIVE;
--- RESET signs the user out everywhere. Returns one row (AppUserId, TenantId) on success; no row = invalid or expired link.
+-- RESET signs the user out everywhere. Both prove the email, so they also mark it verified (handoff 22). Returns one row (AppUserId, TenantId) on success; no row = invalid or expired link.
 CREATE PROCEDURE sec.usp_Auth_RedeemToken
     @TokenHash      BINARY(32),
     @Purpose        VARCHAR(10),
@@ -30,7 +30,7 @@ BEGIN
     UPDATE sec.UserToken SET UsedAt = @Now WHERE Id = @TokenId;
     UPDATE sec.UserCredential
     SET PasswordHash = @PasswordHash, PasswordChangedAt = @Now, MustChangePassword = 0,
-        FailedAttempts = 0, LockedUntil = NULL, ModifiedAt = @Now
+        FailedAttempts = 0, LockedUntil = NULL, ModifiedAt = @Now, EmailVerifiedAt = COALESCE(EmailVerifiedAt, @Now)
     WHERE AppUserId = @AppUserId;
 
     IF @Purpose = 'INVITE'

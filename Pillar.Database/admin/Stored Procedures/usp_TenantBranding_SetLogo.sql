@@ -1,6 +1,6 @@
 -- Saves (or with @LogoImage = NULL, removes) the session tenant's invoice logo.
 -- The type comes from the file's own signature, not the upload's name or header: PNG or JPEG only, 512 KB max.
--- Creates the admin.TenantBranding row on first use.
+-- Creates the admin.TenantBranding row on first use. Needs settings.branding.
 CREATE PROCEDURE admin.usp_TenantBranding_SetLogo
     @LogoImage      VARBINARY(MAX),
     @LogoFileName   NVARCHAR(260) = NULL
@@ -15,6 +15,8 @@ BEGIN
             @MimeType VARCHAR(20);
 
     IF @TenantId IS NULL THROW 50911, N'No tenant in session.', 1;
+    IF NOT EXISTS (SELECT 1 FROM sec.fn_UserHasPermission(@TenantId, @UserId, 'settings.branding'))
+        THROW 51704, N'You need permission to change branding.', 1;
 
     IF @LogoImage IS NOT NULL
     BEGIN
@@ -37,4 +39,7 @@ BEGIN
     WHEN NOT MATCHED AND @LogoImage IS NOT NULL THEN
         INSERT (TenantId, LogoImage, LogoMimeType, LogoFileName, LogoUpdatedAt, LogoUpdatedBy)
         VALUES (@TenantId, @LogoImage, @MimeType, @LogoFileName, @Now, @UserId);
+
+    EXEC admin.usp_Audit_Write @Area = 'branding', @EntityType = 'LOGO', @Action = 'UPDATE',
+         @Summary = N'Changed the invoice logo';
 END;

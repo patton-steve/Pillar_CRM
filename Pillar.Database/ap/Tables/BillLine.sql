@@ -1,6 +1,11 @@
 -- Lines of a bill or expense report. Quantity x UnitPrice = Amount (mileage: miles x the category's UnitRate).
 -- A billable line (needs ProjectId) is picked up by the next invoice run as an EXPENSE line at BillableAmount
 -- (Amount plus MarkupPercent) once the bill is approved; InvoiceEntryId links it, like time.
+-- Receipt reading (Pilo, AI plans): the API reads the receipt photo, logs the call in ai.Generation (Feature RECEIPT) and
+-- pre-fills the line. ReceiptReadJson keeps what Pilo read, per field with its confidence, so the UI can flag weak fields:
+--   {"amount":{"value":42.18,"confidence":0.97},"date":{"value":"2026-10-20","confidence":0.91},
+--    "merchant":{"value":"Office Depot","confidence":0.88},"category":{"value":"SUPPLIES","confidence":0.62}}
+-- ReceiptConfidence is the lowest field confidence (0 to 1). Merchant is free text (expense lines have no vendor).
 CREATE TABLE ap.BillLine
 (
     Id                  INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_BillLine PRIMARY KEY CLUSTERED,
@@ -24,6 +29,10 @@ CREATE TABLE ap.BillLine
     ModifiedAt          DATETIME2(0)    NULL,
     ModifiedBy          INT             NULL,
     RowVer              ROWVERSION      NOT NULL,
+    Merchant            NVARCHAR(200)   NULL,
+    ReceiptGenerationId BIGINT          NULL,
+    ReceiptReadJson     NVARCHAR(MAX)   NULL,
+    ReceiptConfidence   DECIMAL(5,4)    NULL,
     CONSTRAINT UQ_BillLine_Tenant_Id UNIQUE (TenantId, Id),
     CONSTRAINT UQ_BillLine_Bill_Line UNIQUE (TenantId, BillId, LineNumber),
     CONSTRAINT CK_BillLine_Billable CHECK (IsBillable = 0 OR ProjectId IS NOT NULL),
@@ -33,7 +42,10 @@ CREATE TABLE ap.BillLine
     CONSTRAINT FK_BillLine_Project FOREIGN KEY (TenantId, ProjectId) REFERENCES crm.ClientProject (TenantId, Id),
     -- task must belong to the project
     CONSTRAINT FK_BillLine_Task FOREIGN KEY (TenantId, ProjectId, TaskId) REFERENCES crm.ClientTask (TenantId, ProjectId, Id),
-    CONSTRAINT FK_BillLine_InvoiceEntry FOREIGN KEY (TenantId, InvoiceEntryId) REFERENCES ar.InvoiceEntry (TenantId, Id)
+    CONSTRAINT FK_BillLine_InvoiceEntry FOREIGN KEY (TenantId, InvoiceEntryId) REFERENCES ar.InvoiceEntry (TenantId, Id),
+    CONSTRAINT CK_BillLine_ReceiptRead CHECK (ReceiptReadJson IS NULL OR ISJSON(ReceiptReadJson) = 1),
+    CONSTRAINT CK_BillLine_ReceiptConfidence CHECK (ReceiptConfidence IS NULL OR (ReceiptConfidence >= 0 AND ReceiptConfidence <= 1)),
+    CONSTRAINT FK_BillLine_ReceiptGeneration FOREIGN KEY (TenantId, ReceiptGenerationId) REFERENCES ai.Generation (TenantId, Id)
 );
 GO
 CREATE NONCLUSTERED INDEX IX_BillLine_Billable ON ap.BillLine (TenantId, ProjectId)

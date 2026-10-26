@@ -1,10 +1,14 @@
 -- Creates a task and assigns its TaskKey (<project type KeyPrefix>-<next number for that prefix>).
 -- Tenant comes from SESSION_CONTEXT; assignee, reporter and CreatedBy default to SESSION_CONTEXT UserId.
 -- Status and priority default to the tenant's IsDefault values; IsBillable defaults from the project.
+-- Needs task.create, and the project must be set up (no BLOCK rows in crm.fn_ProjectSetupIssues; the tenant picks the checks).
+-- crm.trg_ClientTask_Notify adds the watchers and notifies the project manager and the assignee.
 CREATE PROCEDURE crm.usp_ClientTask_Create
     @ProjectId          INT,
     @Title              NVARCHAR(200),
     @Description        NVARCHAR(MAX) = NULL,
+    @StepsToReplicate   NVARCHAR(MAX) = NULL,
+    @ResolutionCriteria NVARCHAR(MAX) = NULL,
     @TaskTypeId         INT = NULL,
     @TaskStatusId       INT = NULL,
     @TaskPriorityId     INT = NULL,
@@ -22,6 +26,7 @@ BEGIN
 
     DECLARE @TenantId INT = CAST(SESSION_CONTEXT(N'TenantId') AS INT),
             @UserId   INT = CAST(SESSION_CONTEXT(N'UserId') AS INT),
+            @Missing  NVARCHAR(2048),
             @Prefix   VARCHAR(10),
             @SeqKey   VARCHAR(30),
             @Number   INT;
@@ -35,6 +40,12 @@ BEGIN
     WHERE p.TenantId = @TenantId AND p.Id = @ProjectId AND p.DeletedAt IS NULL;
 
     IF @Prefix IS NULL THROW 50302, N'Project not found.', 1;
+    IF NOT EXISTS (SELECT 1 FROM sec.fn_UserHasPermission(@TenantId, @UserId, 'task.create'))
+        THROW 50303, N'You don''t have permission to create tasks.', 1;
+    SELECT @Missing = CONCAT(N'Finish setting up the project first: ', STRING_AGG(Message, N' ') WITHIN GROUP (ORDER BY SortOrder))
+    FROM crm.fn_ProjectSetupIssues(@TenantId, @ProjectId) WHERE Severity = 'BLOCK'
+    HAVING COUNT(*) > 0;
+    IF @Missing IS NOT NULL THROW 50304, @Missing, 1;
 
     SET @TaskStatusId = COALESCE(@TaskStatusId,
         (SELECT TOP (1) Id FROM lkp.TaskStatus WHERE TenantId = @TenantId AND IsActive = 1 ORDER BY IsDefault DESC, SortOrder, Id));
@@ -49,11 +60,11 @@ BEGIN
     SET @TaskKey = @Prefix + '-' + CAST(@Number AS VARCHAR(10));
 
     INSERT INTO crm.ClientTask
-        (TenantId, ProjectId, TaskKey, TaskNumber, Title, Description, TaskTypeId, TaskStatusId, TaskPriorityId,
-         AssignedUserId, EstimatedHours, StartDate, DueDate, IsBillable)
+        (TenantId, ProjectId, TaskKey, TaskNumber, Title, Description, StepsToReplicate, ResolutionCriteria, TaskTypeId,
+         TaskStatusId, TaskPriorityId, AssignedUserId, EstimatedHours, StartDate, DueDate, IsBillable)
     VALUES
-        (@TenantId, @ProjectId, @TaskKey, @Number, @Title, @Description, @TaskTypeId, @TaskStatusId, @TaskPriorityId,
-         @AssignedUserId, @EstimatedHours, @StartDate, @DueDate, @IsBillable);
+        (@TenantId, @ProjectId, @TaskKey, @Number, @Title, @Description, @StepsToReplicate, @ResolutionCriteria, @TaskTypeId,
+         @TaskStatusId, @TaskPriorityId, @AssignedUserId, @EstimatedHours, @StartDate, @DueDate, @IsBillable);
 
     SET @TaskId = SCOPE_IDENTITY();
 
