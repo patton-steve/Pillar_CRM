@@ -6,7 +6,9 @@
 --   IncludedSeats      logins included (people with CanLogin = 1 who aren't disabled); NULL = unlimited
 --   ExtraSeatPrice     per extra seat per month, charged on the month's peak seat count
 --   IncludedAiReports  Pilo reports a month; AiOveragePrice per report past that (capped by the tenant's Pilo.OverageCapAmount)
--- Per tenant, Seats.IncludedOverride, Seats.ExtraPriceOverride and Pilo.MonthlyReportsOverride replace them (custom quotes).
+--   IncludedAiSearches Ask Pilo searches a month (handoff 24); a hard limit, no overage. admin.fn_PiloSearchUsage counts them.
+-- Per tenant, Seats.IncludedOverride, Seats.ExtraPriceOverride, Pilo.MonthlyReportsOverride and Pilo.MonthlySearchesOverride
+-- replace them (custom quotes).
 CREATE TABLE admin.[Plan]
 (
     Id              INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_Plan PRIMARY KEY CLUSTERED,
@@ -23,10 +25,12 @@ CREATE TABLE admin.[Plan]
     IncludedAiReports INT           NOT NULL CONSTRAINT DF_Plan_IncludedAiReports DEFAULT (0),
     AiOveragePrice  DECIMAL(19,2)   NULL,
     SortOrder       INT             NOT NULL CONSTRAINT DF_Plan_SortOrder DEFAULT (0),
+    IncludedAiSearches INT          NOT NULL CONSTRAINT DF_Plan_IncludedAiSearches DEFAULT (0),   -- handoff 24: appended
     CONSTRAINT UQ_Plan_Code UNIQUE (Code),
     CONSTRAINT CK_Plan_FeeRate CHECK (FeeRate >= 0 AND FeeRate < 1),
     CONSTRAINT CK_Plan_Prices CHECK (MonthlyPrice >= 0 AND (ExtraSeatPrice IS NULL OR ExtraSeatPrice >= 0)
-        AND (AiOveragePrice IS NULL OR AiOveragePrice >= 0) AND IncludedAiReports >= 0 AND (IncludedSeats IS NULL OR IncludedSeats >= 1))
+        AND (AiOveragePrice IS NULL OR AiOveragePrice >= 0) AND IncludedAiReports >= 0 AND (IncludedSeats IS NULL OR IncludedSeats >= 1)),
+    CONSTRAINT CK_Plan_AiSearches CHECK (IncludedAiSearches >= 0)
 );
 GO
 CREATE UNIQUE NONCLUSTERED INDEX UX_Plan_IsDefault ON admin.[Plan] (IsDefault) WHERE IsDefault = 1;

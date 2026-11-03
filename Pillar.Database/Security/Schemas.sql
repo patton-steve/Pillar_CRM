@@ -15,3 +15,6 @@ GO
 CREATE SCHEMA help AUTHORIZATION dbo;
 GO
 CREATE SCHEMA ai AUTHORIZATION dbo;
+GO
+-- Ask Pilo's reporting views (handoff 24): the only objects the pillar_ai_reader login can read
+CREATE SCHEMA rpt AUTHORIZATION dbo;

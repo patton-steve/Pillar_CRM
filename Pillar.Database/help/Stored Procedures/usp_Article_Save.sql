@@ -9,7 +9,8 @@ CREATE PROCEDURE help.usp_Article_Save
     @SortOrder      INT = 0,
     @IsPublished    BIT = 0,
     @Source         VARCHAR(10) = 'MANUAL',
-    @ArticleId      INT = NULL OUTPUT
+    @ArticleId      INT = NULL OUTPUT,
+    @ScreenTags     NVARCHAR(400) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -24,16 +25,16 @@ BEGIN
 
     IF @ArticleId IS NULL
     BEGIN
-        INSERT INTO help.Article (Slug, Title, Summary, Body, Category, Keywords, SortOrder, IsPublished, Source, PublishedAt)
+        INSERT INTO help.Article (Slug, Title, Summary, Body, Category, Keywords, SortOrder, IsPublished, Source, PublishedAt, ScreenTags)
         VALUES (@Slug, @Title, @Summary, @Body, @Category, @Keywords, @SortOrder, @IsPublished, @Source,
-                IIF(@IsPublished = 1, SYSUTCDATETIME(), NULL));
+                IIF(@IsPublished = 1, SYSUTCDATETIME(), NULL), @ScreenTags);
         SET @ArticleId = SCOPE_IDENTITY();
     END
     ELSE
     BEGIN
         UPDATE help.Article
         SET Slug = @Slug, Title = @Title, Summary = @Summary, Body = @Body, Category = @Category, Keywords = @Keywords,
-            SortOrder = @SortOrder, IsPublished = @IsPublished, Source = @Source,
+            SortOrder = @SortOrder, IsPublished = @IsPublished, Source = @Source, ScreenTags = @ScreenTags,
             PublishedAt = CASE WHEN @IsPublished = 1 THEN COALESCE(PublishedAt, SYSUTCDATETIME()) ELSE PublishedAt END,
             ModifiedAt = SYSUTCDATETIME(), ModifiedBy = CONVERT(INT, SESSION_CONTEXT(N'UserId'))
         WHERE Id = @ArticleId;

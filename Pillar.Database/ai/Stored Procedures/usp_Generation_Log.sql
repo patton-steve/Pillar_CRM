@@ -1,6 +1,8 @@
 -- The API logs each Pilo model call for the session tenant and user (ai.Generation). When a report that counts toward the quota
 -- reaches 80% of the month's allowance, or all of it, billing.manage holders get PILO_USAGE_NEAR_LIMIT.
 -- A RECEIPT read counts toward the allowance only when Pilo.ReceiptsCountTowardQuota is on (off by default: fair use, like Polish).
+-- Handoff 24: @Prompt and @Outcome (OK, DECLINED, INVALID_SQL, ERROR). A call that failed, or whose outcome isn't OK, never
+-- counts toward the allowance, whatever the API passes.
 CREATE PROCEDURE ai.usp_Generation_Log
     @Feature            VARCHAR(15),
     @Model              VARCHAR(100),
@@ -10,7 +12,9 @@ CREATE PROCEDURE ai.usp_Generation_Log
     @CountsTowardQuota  BIT = 0,
     @Succeeded          BIT = 1,
     @SavedReportId      INT = NULL,
-    @GenerationId       BIGINT = NULL OUTPUT
+    @GenerationId       BIGINT = NULL OUTPUT,
+    @Prompt             NVARCHAR(2000) = NULL,
+    @Outcome            VARCHAR(20) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -22,9 +26,12 @@ BEGIN
 
     IF @Feature = 'RECEIPT'
         SELECT @CountsTowardQuota = ISNULL(TRY_CONVERT(BIT, Value), 0) FROM admin.fn_Setting(@TenantId, NULL, 'Pilo.ReceiptsCountTowardQuota');
+    IF @Succeeded = 0 OR ISNULL(@Outcome, 'OK') <> 'OK' SET @CountsTowardQuota = 0;
 
-    INSERT INTO ai.Generation (TenantId, AppUserId, Feature, Model, InputTokens, OutputTokens, CostUsd, CountsTowardQuota, Succeeded, SavedReportId)
-    VALUES (@TenantId, @UserId, @Feature, @Model, @InputTokens, @OutputTokens, @CostUsd, @CountsTowardQuota, @Succeeded, @SavedReportId);
+    INSERT INTO ai.Generation (TenantId, AppUserId, Feature, Model, InputTokens, OutputTokens, CostUsd, CountsTowardQuota, Succeeded,
+                               SavedReportId, Prompt, Outcome)
+    VALUES (@TenantId, @UserId, @Feature, @Model, @InputTokens, @OutputTokens, @CostUsd, @CountsTowardQuota, @Succeeded,
+            @SavedReportId, @Prompt, @Outcome);
     SET @GenerationId = SCOPE_IDENTITY();
 
     IF @CountsTowardQuota = 1

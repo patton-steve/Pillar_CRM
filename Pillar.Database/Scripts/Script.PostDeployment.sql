@@ -278,22 +278,24 @@ WHEN MATCHED THEN UPDATE SET Name = s.Name, SortOrder = s.SortOrder, SystemCode 
 WHEN NOT MATCHED THEN INSERT (Code, Name, SortOrder, SystemCode, IsDefault, IsLocked) VALUES (s.Code, s.Name, s.SortOrder, s.SystemCode, s.IsDefault, 1);
 
 -- Prices and seats (Steve 2026-10-22). Extra seats are $12 per user per month on every plan, Flat included.
+-- Ask Pilo searches a month (handoff 24): 500 / 2,000 / 5,000 on the AI plans, none on Flat.
 MERGE admin.[Plan] AS t
 USING (VALUES
-    --                                 fee rate   cap   min   default  price  seats  extra seat  AI reports  overage  sort
-    ('STANDARD',   N'Flat',            0.025000, NULL, NULL, 1,        0.00,  2,     12.00,      0,          NULL,    10),
-    ('AI_POWERED', N'AI Powered',      0.025000, NULL, NULL, 0,       39.00,  5,     12.00,      60,         0.75,    20),
-    ('AI_PLUS',    N'AI Powered Plus', 0.025000, NULL, NULL, 0,       89.00,  10,    12.00,      200,        0.50,    30),
-    ('ENTERPRISE', N'Enterprise',      0.025000, NULL, NULL, 0,      209.00,  20,    12.00,      500,        0.35,    40)
-) AS s (Code, Name, FeeRate, PerInvoiceCap, MonthlyMinimum, IsDefault, MonthlyPrice, IncludedSeats, ExtraSeatPrice, IncludedAiReports, AiOveragePrice, SortOrder)
+    --                                 fee rate   cap   min   default  price  seats  extra seat  AI reports  overage  sort  searches
+    ('STANDARD',   N'Flat',            0.025000, NULL, NULL, 1,        0.00,  2,     12.00,      0,          NULL,    10,   0),
+    ('AI_POWERED', N'AI Powered',      0.025000, NULL, NULL, 0,       39.00,  5,     12.00,      60,         0.75,    20,   500),
+    ('AI_PLUS',    N'AI Powered Plus', 0.025000, NULL, NULL, 0,       89.00,  10,    12.00,      200,        0.50,    30,   2000),
+    ('ENTERPRISE', N'Enterprise',      0.025000, NULL, NULL, 0,      209.00,  20,    12.00,      500,        0.35,    40,   5000)
+) AS s (Code, Name, FeeRate, PerInvoiceCap, MonthlyMinimum, IsDefault, MonthlyPrice, IncludedSeats, ExtraSeatPrice, IncludedAiReports, AiOveragePrice, SortOrder, IncludedAiSearches)
 ON t.Code = s.Code
 WHEN MATCHED THEN UPDATE SET Name = s.Name, FeeRate = s.FeeRate, PerInvoiceCap = s.PerInvoiceCap,
     MonthlyMinimum = s.MonthlyMinimum, IsDefault = s.IsDefault, MonthlyPrice = s.MonthlyPrice, IncludedSeats = s.IncludedSeats,
-    ExtraSeatPrice = s.ExtraSeatPrice, IncludedAiReports = s.IncludedAiReports, AiOveragePrice = s.AiOveragePrice, SortOrder = s.SortOrder
+    ExtraSeatPrice = s.ExtraSeatPrice, IncludedAiReports = s.IncludedAiReports, AiOveragePrice = s.AiOveragePrice, SortOrder = s.SortOrder,
+    IncludedAiSearches = s.IncludedAiSearches
 WHEN NOT MATCHED THEN INSERT (Code, Name, FeeRate, PerInvoiceCap, MonthlyMinimum, IsDefault, MonthlyPrice, IncludedSeats, ExtraSeatPrice,
-    IncludedAiReports, AiOveragePrice, SortOrder)
+    IncludedAiReports, AiOveragePrice, SortOrder, IncludedAiSearches)
     VALUES (s.Code, s.Name, s.FeeRate, s.PerInvoiceCap, s.MonthlyMinimum, s.IsDefault, s.MonthlyPrice, s.IncludedSeats, s.ExtraSeatPrice,
-    s.IncludedAiReports, s.AiOveragePrice, s.SortOrder);
+    s.IncludedAiReports, s.AiOveragePrice, s.SortOrder, s.IncludedAiSearches);
 
 ------------------------------------------------------------------ Reports
 MERGE admin.ReportCategory AS t
@@ -509,6 +511,9 @@ USING (VALUES
     ('Seats.ExtraPriceOverride',     N'Platform', N'Extra seat price',             N'Replaces Plan.ExtraSeatPrice for this tenant (custom quote). NULL = plan price.', 'DECIMAL', NULL, NULL, 'PLATFORM_ONLY', 0, 62),
     ('Pilo.MonthlyReportsOverride',  N'Platform', N'Pilo reports a month',         N'Replaces Plan.IncludedAiReports for this tenant. NULL = plan allowance.', 'INT', NULL, NULL, 'PLATFORM_ONLY', 0, 64),
     ('Time.WeeklyHoursGoal',         N'Time',     N'Weekly hours goal',            N'Hours a person aims to log each week, shown on Today. A person can have their own goal.', 'DECIMAL', N'40', NULL, 'TENANT_EDIT', 1, 50),
+    ('Pilo.TenantWritingRules',      N'Pilo',     N'Company writing rules',        N'House rules Pilo follows when it rewrites notes, e.g. "Use client names, never initials." Up to 400 characters.', 'STRING', NULL, NULL, 'TENANT_EDIT', 0, 20),
+    ('Pilo.MonthlySearchesOverride', N'Platform', N'Pilo searches a month',        N'Replaces Plan.IncludedAiSearches for this tenant. NULL = plan allowance.', 'INT', NULL, NULL, 'PLATFORM_ONLY', 0, 68),
+    ('Feature.PiloHelp',             N'Platform', N'Pilo Help',                    N'Pilo answers how-to questions from the help articles. On in every plan.', 'BIT', N'1', NULL, 'PLATFORM_ONLY', 0, 41),
     ('Pilo.ReceiptsCountTowardQuota', N'Platform', N'Receipt reads count as Pilo reports', N'On: each Pilo receipt read counts toward the monthly Pilo report allowance. Off (default): fair use, like Polish with Pilo.', 'BIT', N'0', NULL, 'PLATFORM_ONLY', 0, 66)
 ) AS s (SettingKey, Category, DisplayName, Description, DataType, DefaultValue, AllowedValues, Visibility, AllowUserOverride, SortOrder)
 ON t.SettingKey = s.SettingKey
@@ -555,6 +560,8 @@ WHEN MATCHED THEN UPDATE SET Value = s.Value
 WHEN NOT MATCHED THEN INSERT (PlanId, SettingKey, Value) VALUES (s.PlanId, s.SettingKey, s.Value);
 
 ------------------------------------------------------------------ Users and roles
+-- handoff 24: true on the deploy that first adds the Pilo permissions (used for a one-time grant after the role seed)
+DECLARE @PiloPermsNew BIT = IIF(EXISTS (SELECT 1 FROM sec.Permission WHERE Code = 'pilo.polish'), 0, 1);
 -- grid headers; add a row here and it appears in Settings > Roles
 MERGE sec.PermissionCategory AS t
 USING (VALUES
@@ -566,7 +573,8 @@ USING (VALUES
     ('INVOICING',      N'Invoicing',          N'Invoice runs, drafts, issuing and voids.', 60),
     ('PAYMENTS',       N'Payments',           N'Client payments, credit memos and refunds.', 70),
     ('BILLS',          N'Bills & vendors',    N'Vendors, bills, approval and bill payments.', 80),
-    ('REPORTS',        N'Reports & Pilo',     N'Canned reports and Pilo AI reports.', 90),
+    ('REPORTS',        N'Reports',            N'Canned reports.', 90),
+    ('PILO',           N'Pilo',               N'Pilo AI: Polish, Ask Pilo reports, saved and shared reports, and Pilo Help.', 95),
     ('SETTINGS',       N'Settings',           N'Account settings, branding, email and layouts.', 100),
     ('USERS',          N'Users & security',   N'People, roles and permissions.', 110),
     ('PILLAR_BILLING', N'Pillar billing',     N'The Pillar subscription, card on file and statements.', 120)
@@ -605,7 +613,11 @@ USING (
     ('ap.approve',        'BILLS',          N'Approve bills',           N'Approve bills and expense reports.', 200, 1),
     ('ap.pay',            'BILLS',          N'Pay bills',               N'Record bill payments.', 210, 1),
     ('report.financial',  'REPORTS',        N'Financial reports',       N'See AR, AP, revenue and margin reports.', 230, 1),
-    ('report.share',      'REPORTS',        N'Share Pilo reports',      N'Save Pilo reports for the whole company and manage them.', 235, 1),
+    ('pilo.polish',       'PILO',           N'Polish with Pilo',        N'Let Pilo tidy up time entry notes.', 231, 1),
+    ('pilo.ask',          'PILO',           N'Ask Pilo',                N'Ask Pilo for reports and run saved ones. Pilo only sees data the person can already see.', 232, 1),
+    ('pilo.report_save',  'PILO',           N'Save Pilo reports',       N'Keep Pilo reports in My saved AI reports.', 233, 1),
+    ('pilo.help',         'PILO',           N'Pilo Help',               N'Ask Pilo how to do things in Pillar.', 234, 1),
+    ('report.share',      'PILO',           N'Share Pilo reports',      N'Save Pilo reports for the whole company and manage them.', 235, 1),
     ('settings.edit',     'SETTINGS',       N'Change settings (retired)', N'Replaced by one permission per settings page in handoff 21.', 240, 0),
     ('settings.company',  'SETTINGS',       N'Company',                 N'Company details, time zone, remit-to and dashboard options.', 241, 1),
     ('settings.lists',    'SETTINGS',       N'Lists',                   N'Edit lookup lists: client types, task types, expense categories and the rest.', 242, 1),
@@ -672,6 +684,10 @@ USING (VALUES
     ('ADMIN', 'expense.submit'),
     ('ADMIN', 'report.financial'),
     ('ADMIN', 'report.share'),
+    ('ADMIN', 'pilo.polish'),
+    ('ADMIN', 'pilo.ask'),
+    ('ADMIN', 'pilo.report_save'),
+    ('ADMIN', 'pilo.help'),
     ('ADMIN', 'settings.company'),
     ('ADMIN', 'settings.lists'),
     ('ADMIN', 'settings.time'),
@@ -697,6 +713,10 @@ USING (VALUES
     ('MANAGER', 'time.view_all'),
     ('MANAGER', 'time.approve'),
     ('MANAGER', 'report.share'),
+    ('MANAGER', 'pilo.polish'),
+    ('MANAGER', 'pilo.ask'),
+    ('MANAGER', 'pilo.report_save'),
+    ('MANAGER', 'pilo.help'),
     ('MANAGER', 'invoice.view'),
     ('MANAGER', 'expense.submit'),
     ('BILLING', 'client.view'),
@@ -717,11 +737,17 @@ USING (VALUES
     ('BILLING', 'expense.submit'),
     ('BILLING', 'report.financial'),
     ('BILLING', 'time.enter'),
+    ('BILLING', 'pilo.polish'),
+    ('BILLING', 'pilo.ask'),
+    ('BILLING', 'pilo.report_save'),
+    ('BILLING', 'pilo.help'),
     ('MEMBER', 'client.view'),
     ('MEMBER', 'project.view'),
     ('MEMBER', 'task.edit'),
     ('MEMBER', 'time.enter'),
-    ('MEMBER', 'expense.submit')
+    ('MEMBER', 'expense.submit'),
+    ('MEMBER', 'pilo.polish'),
+    ('MEMBER', 'pilo.help')
 ) AS s (RoleCode, PermissionCode)
 ON t.RoleCode = s.RoleCode AND t.PermissionCode = s.PermissionCode
 WHEN NOT MATCHED BY TARGET THEN INSERT (RoleCode, PermissionCode) VALUES (s.RoleCode, s.PermissionCode)
@@ -796,5 +822,15 @@ EXEC admin.usp_SeedTenantEmailTemplates;
 
 -- existing tenants get missing roles and newly granted permissions
 EXEC sec.usp_SeedTenantRoles;
+
+-- handoff 24, one time: Polish used time.enter and Help was open to all, so every role that enters time keeps both,
+-- including roles a tenant customized (which the seed above leaves alone)
+IF @PiloPermsNew = 1
+    INSERT INTO sec.RolePermission (TenantId, RoleId, PermissionCode)
+    SELECT rp.TenantId, rp.RoleId, p.Code
+    FROM sec.RolePermission AS rp
+    JOIN sec.Permission AS p ON p.Code = 'pilo.polish' OR p.Code = 'pilo.help'
+    WHERE rp.PermissionCode = 'time.enter'
+      AND NOT EXISTS (SELECT 1 FROM sec.RolePermission AS x WHERE x.TenantId = rp.TenantId AND x.RoleId = rp.RoleId AND x.PermissionCode = p.Code);
 
 EXEC sp_set_session_context N'IsPlatformAdmin', NULL;

@@ -4,6 +4,10 @@
 -- parameter values saved with it. Limits come from plan-derived settings Pilo.SavedReportsPerUser (5/10/25) and
 -- Pilo.CompanyReports (50 on Enterprise, 0 below), enforced by admin.usp_SavedReport_Save.
 -- RenderType is the "Show it as" choice (admin.ReportRenderType); NULL = Pilo chose.
+-- Ask Pilo (handoff 24): SqlText is the one SELECT Pilo wrote over the rpt views, run on the pillar_ai_reader connection;
+-- its @name parameters are admin.SavedReportParameter rows. ChartSpec is the chart JSON the API returns with the rows.
+-- Definition stays for anything else the API keeps with the report ('{}' when there is nothing). Each run is logged in
+-- admin.SavedReportRun; a re-run never calls the model and isn't counted toward the Pilo allowance.
 CREATE TABLE admin.SavedReport
 (
     Id              INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_SavedReport PRIMARY KEY CLUSTERED,
@@ -24,12 +28,15 @@ CREATE TABLE admin.SavedReport
     ModifiedBy      INT             NULL,
     RowVer          ROWVERSION      NOT NULL,
     RenderType      VARCHAR(30)     NULL,          -- appended in handoff 20
+    SqlText         NVARCHAR(MAX)   NULL,          -- appended in handoff 24
+    ChartSpec       NVARCHAR(MAX)   NULL,
     CONSTRAINT UQ_SavedReport_PublicId UNIQUE (PublicId),
     CONSTRAINT UQ_SavedReport_Tenant_Id UNIQUE (TenantId, Id),
     CONSTRAINT CK_SavedReport_Definition CHECK (ISJSON(Definition) = 1),
     CONSTRAINT CK_SavedReport_ParameterJson CHECK (ParameterJson IS NULL OR ISJSON(ParameterJson) = 1),
     CONSTRAINT FK_SavedReport_RenderType FOREIGN KEY (RenderType) REFERENCES admin.ReportRenderType (Code),
-    CONSTRAINT FK_SavedReport_Owner FOREIGN KEY (TenantId, OwnerUserId) REFERENCES sec.AppUser (TenantId, Id)
+    CONSTRAINT FK_SavedReport_Owner FOREIGN KEY (TenantId, OwnerUserId) REFERENCES sec.AppUser (TenantId, Id),
+    CONSTRAINT CK_SavedReport_ChartSpec CHECK (ChartSpec IS NULL OR ISJSON(ChartSpec) = 1)
 );
 GO
 CREATE NONCLUSTERED INDEX IX_SavedReport_Owner ON admin.SavedReport (TenantId, OwnerUserId, IsShared) WHERE DeletedAt IS NULL;

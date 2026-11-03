@@ -16,5 +16,11 @@
     <Build Update="Security\usp_ReportContext_Set.sql">
       <SuppressTSqlWarnings>71502</SuppressTSqlWarnings>
     </Build>
+    <Build Update="Security\usp_PiloReader_SetContext.sql">
+      <SuppressTSqlWarnings>71502</SuppressTSqlWarnings>
+    </Build>
+    <Build Update="admin\Stored Procedures\usp_PiloCatalog.sql">
+      <SuppressTSqlWarnings>71502</SuppressTSqlWarnings>
+    </Build>
   </ItemGroup>
 </Project>

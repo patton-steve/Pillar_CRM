@@ -1,5 +1,7 @@
 -- Help articles for Pilo Help and the Help page, edited in the back office (help.usp_Article_Save). Global (no TenantId).
 -- Body is Markdown. Source AI marks articles Pilo drafted (phase 2); a person publishes them. Only IsPublished rows reach tenants.
+-- Slug is the article's key. ScreenTags (handoff 24) lists the app screens an article is about, comma-separated
+-- (e.g. time.week,time.approvals), so Pilo Help can start from the screen the person is on. Pilo Help needs Feature.PiloHelp.
 CREATE TABLE help.Article
 (
     Id              INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_Article PRIMARY KEY CLUSTERED,
@@ -17,6 +19,7 @@ CREATE TABLE help.Article
     CreatedBy       INT             NULL CONSTRAINT DF_Article_CreatedBy DEFAULT (CONVERT(INT, SESSION_CONTEXT(N'UserId'))),
     ModifiedAt      DATETIME2(0)    NULL,
     ModifiedBy      INT             NULL,
+    ScreenTags      NVARCHAR(400)   NULL,          -- handoff 24: appended
     CONSTRAINT UQ_Article_Slug UNIQUE (Slug),
     CONSTRAINT CK_Article_Source CHECK (Source = 'MANUAL' OR Source = 'AI')
 );

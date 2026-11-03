@@ -16,6 +16,7 @@ Walks one tenant through the billing path end to end:
   -> seats, plan changes, plan/seat/Pilo statement lines, failed charge and mark paid, suspend, support access and sign-in as,
      support tickets, announcements, help articles, sample company.
   -> Today layouts per role, weekly hours goal, weekly expense reports with the timesheet and Pilo receipt reads, search, contacts.
+  -> Ask Pilo: permissions, search allowance, usage log with prompts, saved report SQL/parameters/runs, rpt views and catalog, help by screen.
 Step 1 signs up the way the app does since handoff 22: terms accepted, email verified, application sent, then approved by Pillar.
 Every step asserts its result and THROWs on the first failure. Everything runs in one transaction that is
 rolled back at the end, so the database is left as it was. Set @Keep = 1 to commit and inspect the rows.
@@ -1318,6 +1319,92 @@ INSERT INTO @Contacts EXEC crm.usp_Contact_List @Search = N'', @PageSize = 10;
 IF NOT EXISTS (SELECT 1 FROM @Contacts WHERE ContactId = @ContactId AND ClientId = @ClientId AND TotalCount >= 1)
     THROW 59154, N'The contacts list should include the client''s contact.', 1;
 PRINT 'ok 26 Today layouts (default, role, own, reset), weekly hours goal, weekly expenses with a receipt read (submit, send back, move, approve), search, contacts';
+
+------------------------------------------------------------------ 27. Ask Pilo: permissions, search allowance, usage log, saved report SQL and runs, rpt views, catalog, help by screen
+-- sec.usp_PiloReader_SetContext isn't called here: its read-only keys would pin this session for the rest of the script.
+DECLARE @PiloSr INT, @PiloRunId BIGINT, @PiloGen BIGINT, @PiloArt INT;
+DECLARE @Catalog TABLE (ViewName NVARCHAR(128), QualifiedName NVARCHAR(140), ViewDescription NVARCHAR(1000), Ordinal INT,
+        ColumnName NVARCHAR(128), DataType NVARCHAR(200), IsNullable BIT, ColumnDescription NVARCHAR(1000));
+DECLARE @Articles TABLE (Id INT, Slug VARCHAR(100), Title NVARCHAR(200), Summary NVARCHAR(400), Category NVARCHAR(50), SortOrder INT,
+        IsPublished BIT, Source VARCHAR(10), PublishedAt DATETIME2(0), ModifiedAt DATETIME2(0), ScreenTags NVARCHAR(400));
+
+-- permissions: the PILO category and the default grants
+IF (SELECT COUNT(*) FROM sec.Permission AS p
+    WHERE p.CategoryCode = 'PILO' AND p.Code IN ('pilo.polish', 'pilo.ask', 'pilo.report_save', 'pilo.help', 'report.share')) <> 5
+   OR NOT EXISTS (SELECT 1 FROM sec.Role AS r JOIN sec.RolePermission AS rp ON rp.TenantId = r.TenantId AND rp.RoleId = r.Id
+                  WHERE r.TenantId = @TenantId AND r.BaseRoleCode = 'MEMBER' AND rp.PermissionCode = 'pilo.polish')
+   OR EXISTS (SELECT 1 FROM sec.Role AS r JOIN sec.RolePermission AS rp ON rp.TenantId = r.TenantId AND rp.RoleId = r.Id
+              WHERE r.TenantId = @TenantId AND r.BaseRoleCode = 'MEMBER' AND r.IsSystem = 1 AND rp.PermissionCode = 'pilo.ask')
+   OR NOT EXISTS (SELECT 1 FROM sec.fn_UserHasPermission(@TenantId, @UserId, 'pilo.ask'))
+    THROW 59155, N'The Pilo permissions should sit in the PILO category; Members get Polish and Help, not Ask.', 1;
+
+-- search allowance: 3 a month for this test; a failed search doesn't count
+EXEC sp_set_session_context N'IsPlatformAdmin', 1;
+EXEC admin.usp_Tenant_SetOverride @TenantId = @TenantId, @SettingKey = 'Pilo.MonthlySearchesOverride', @Value = N'3', @Reason = N'Smoke test';
+EXEC admin.usp_Tenant_SetOverride @TenantId = @TenantId, @SettingKey = 'Feature.Pilo', @Value = N'1', @Reason = N'Smoke test';
+EXEC admin.usp_Tenant_SetOverride @TenantId = @TenantId, @SettingKey = 'Pilo.SavedReportsPerUser', @Value = N'50', @Reason = N'Smoke test';
+EXEC sp_set_session_context N'IsPlatformAdmin', NULL;
+EXEC ai.usp_Generation_Log @Feature = 'ASK_SEARCH', @Model = 'smoke-model', @Prompt = N'Globex invoices', @Outcome = 'OK', @GenerationId = @PiloGen OUTPUT;
+EXEC ai.usp_Generation_Log @Feature = 'ASK_SEARCH', @Model = 'smoke-model', @Prompt = N'Late tasks', @Outcome = 'OK', @GenerationId = @PiloGen OUTPUT;
+EXEC ai.usp_Generation_Log @Feature = 'ASK_SEARCH', @Model = 'smoke-model', @Succeeded = 0, @Outcome = 'ERROR', @GenerationId = @PiloGen OUTPUT;
+IF NOT EXISTS (SELECT 1 FROM admin.fn_PiloSearchUsage(@TenantId, @ThisMonth) WHERE Searches = 2 AND IncludedSearches = 3 AND Remaining = 1)
+    THROW 59156, N'Two good searches out of three included should leave one; the failed one doesn''t count.', 1;
+
+-- usage log: a declined report never counts toward the allowance, and keeps its prompt
+EXEC ai.usp_Generation_Log @Feature = 'ASK_REPORT', @Model = 'smoke-model', @CountsTowardQuota = 1, @Prompt = N'Show me everyone''s salary',
+     @Outcome = 'DECLINED', @GenerationId = @PiloGen OUTPUT;
+IF NOT EXISTS (SELECT 1 FROM ai.Generation WHERE Id = @PiloGen AND CountsTowardQuota = 0 AND Outcome = 'DECLINED' AND Prompt LIKE N'%salary%')
+    THROW 59157, N'A declined report should be logged with its prompt and not counted.', 1;
+EXEC ai.usp_Generation_List @Feature = 'ASK_REPORT', @Top = 5;
+
+-- saved report with SQL, a chart and two parameters, then a re-run with its details
+EXEC admin.usp_SavedReport_Save @SavedReportId = @PiloSr OUTPUT, @Name = N'Hours by client', @Prompt = N'Hours by client between two dates',
+     @SqlText = N'SELECT TOP (500) ClientName, SUM(Hours) AS Hours FROM rpt.TimeEntry WHERE WorkDate >= @from AND WorkDate <= @to GROUP BY ClientName',
+     @ChartSpec = N'{"type":"bar","x":"ClientName","y":"Hours"}',
+     @Parameters = N'[{"name":"from","label":"From","type":"date"},{"name":"to","label":"To","type":"DATE","required":false}]';
+EXEC admin.usp_SavedReport_MarkRun @SavedReportId = @PiloSr, @ParameterJson = N'{"from":"2026-01-01","to":"2026-12-31"}',
+     @RowCount = 1, @DurationMs = 42, @RunId = @PiloRunId OUTPUT;
+EXEC ai.usp_Generation_Log @Feature = 'ASK_REPORT', @Model = 'smoke-model', @SavedReportId = @PiloSr, @Prompt = N'Hours by client',
+     @Outcome = 'OK', @GenerationId = @PiloGen OUTPUT;
+EXEC admin.usp_SavedReport_Get @SavedReportId = @PiloSr;
+IF NOT EXISTS (SELECT 1 FROM admin.SavedReport WHERE Id = @PiloSr AND SqlText LIKE N'%rpt.TimeEntry%' AND ChartSpec LIKE N'%bar%'
+               AND Definition = N'{}' AND RunCount = 1 AND ParameterJson LIKE N'%2026-01-01%')
+   OR (SELECT COUNT(*) FROM admin.SavedReportParameter WHERE SavedReportId = @PiloSr AND DataType = 'DATE') <> 2
+   OR NOT EXISTS (SELECT 1 FROM admin.SavedReportParameter WHERE SavedReportId = @PiloSr AND Name = 'to' AND IsRequired = 0)
+   OR NOT EXISTS (SELECT 1 FROM admin.SavedReportRun WHERE Id = @PiloRunId AND SavedReportId = @PiloSr AND RunBy = @UserId
+                  AND [RowCount] = 1 AND DurationMs = 42 AND Succeeded = 1)
+   OR NOT EXISTS (SELECT 1 FROM ai.Generation WHERE Id = @PiloGen AND SavedReportId = @PiloSr)
+    THROW 59158, N'A saved report should keep its SQL, chart and parameters, and a re-run should be recorded.', 1;
+-- saving again with one parameter replaces the set
+EXEC admin.usp_SavedReport_Save @SavedReportId = @PiloSr, @Parameters = N'[{"name":"from","type":"DATE"}]';
+IF (SELECT COUNT(*) FROM admin.SavedReportParameter WHERE SavedReportId = @PiloSr) <> 1
+    THROW 59159, N'Saving new parameters should replace the old set.', 1;
+
+-- rpt views: tenant rows, the owner sees money; the catalog lists every view and column with a description
+IF NOT EXISTS (SELECT 1 FROM rpt.Client WHERE ClientId = @ClientId)
+   OR NOT EXISTS (SELECT 1 FROM rpt.Project WHERE ProjectId = @ProjectId)
+   OR NOT EXISTS (SELECT 1 FROM rpt.Task WHERE TaskId = @TaskId)
+   OR NOT EXISTS (SELECT 1 FROM rpt.TimeEntry WHERE TimeEntryId = @TimeEntryId AND Rate IS NOT NULL)
+   OR NOT EXISTS (SELECT 1 FROM rpt.Invoice WHERE InvoiceId = @InvoiceId)
+   OR EXISTS (SELECT 1 FROM rpt.Client AS r JOIN crm.Client AS c ON c.Id = r.ClientId WHERE c.TenantId <> @TenantId)
+    THROW 59160, N'The rpt views should show this company''s rows, with amounts for the owner.', 1;
+SELECT TOP (0) * FROM rpt.Expense; SELECT TOP (0) * FROM rpt.InvoiceLine; SELECT TOP (0) * FROM rpt.Payment;
+SELECT TOP (0) * FROM rpt.ArAging; SELECT TOP (0) * FROM rpt.Bill; SELECT TOP (0) * FROM rpt.BillPayment; SELECT TOP (0) * FROM rpt.ApAging;
+INSERT INTO @Catalog EXEC admin.usp_PiloCatalog;
+IF (SELECT COUNT(DISTINCT ViewName) FROM @Catalog) <> 12
+   OR EXISTS (SELECT 1 FROM @Catalog WHERE NULLIF(ColumnDescription, N'') IS NULL OR NULLIF(ViewDescription, N'') IS NULL)
+    THROW 59161, N'The Pilo catalog should list the 12 rpt views with a description on every view and column.', 1;
+
+-- Pilo Help: articles tagged by screen
+EXEC sp_set_session_context N'IsPlatformAdmin', 1;
+EXEC help.usp_Article_Save @Slug = 'smoke-pilo-help', @Title = N'Entering time', @Body = N'# Time', @Category = N'Time',
+     @IsPublished = 1, @ScreenTags = N'time, timesheet', @ArticleId = @PiloArt OUTPUT;
+EXEC sp_set_session_context N'IsPlatformAdmin', NULL;
+INSERT INTO @Articles EXEC help.usp_Article_List @Screen = N'timesheet';
+IF NOT EXISTS (SELECT 1 FROM @Articles WHERE Id = @PiloArt)
+   OR NOT EXISTS (SELECT 1 FROM admin.fn_Setting(@TenantId, NULL, 'Feature.PiloHelp') WHERE Value = N'1')
+    THROW 59162, N'Help articles should be found by screen tag, and Pilo Help should be on.', 1;
+PRINT 'ok 27 Ask Pilo permissions, search allowance, usage log (declined not counted), saved report SQL, parameters and runs, rpt views, catalog, help by screen';
 
 ------------------------------------------------------------------ Done
 IF @Keep = 1 COMMIT; ELSE ROLLBACK;

@@ -304,5 +304,11 @@ CREATE SECURITY POLICY sec.TenantIsolationPolicy
     ADD BLOCK  PREDICATE sec.fn_TenantAccessPredicate(TenantId) ON ai.Generation AFTER UPDATE,
     ADD FILTER PREDICATE sec.fn_TenantAccessPredicate(TenantId) ON admin.RoleDashboardLayout,
     ADD BLOCK  PREDICATE sec.fn_TenantAccessPredicate(TenantId) ON admin.RoleDashboardLayout AFTER INSERT,
-    ADD BLOCK  PREDICATE sec.fn_TenantAccessPredicate(TenantId) ON admin.RoleDashboardLayout AFTER UPDATE
+    ADD BLOCK  PREDICATE sec.fn_TenantAccessPredicate(TenantId) ON admin.RoleDashboardLayout AFTER UPDATE,
+    ADD FILTER PREDICATE sec.fn_TenantAccessPredicate(TenantId) ON admin.SavedReportParameter,
+    ADD BLOCK  PREDICATE sec.fn_TenantAccessPredicate(TenantId) ON admin.SavedReportParameter AFTER INSERT,
+    ADD BLOCK  PREDICATE sec.fn_TenantAccessPredicate(TenantId) ON admin.SavedReportParameter AFTER UPDATE,
+    ADD FILTER PREDICATE sec.fn_TenantAccessPredicate(TenantId) ON admin.SavedReportRun,
+    ADD BLOCK  PREDICATE sec.fn_TenantAccessPredicate(TenantId) ON admin.SavedReportRun AFTER INSERT,
+    ADD BLOCK  PREDICATE sec.fn_TenantAccessPredicate(TenantId) ON admin.SavedReportRun AFTER UPDATE
 WITH (STATE = ON, SCHEMABINDING = ON);
