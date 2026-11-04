@@ -133,6 +133,13 @@ Triggers: DATE bills once `BillDate` is reached, MANUAL once someone marks it do
 `ar.usp_InvoiceRun_Generate` turns each ready milestone into one FIXED_FEE line; void and draft delete release it to bill again.
 Invoiced milestones are locked; a change order adds milestones and raises the fee in the same save.
 
+## Help articles
+
+The starter Pilo Help articles live in `Scripts/Seed/HelpArticles.sql`, which `Script.PostDeployment.sql` runs on every publish.
+Edit or add articles there; each is a row in one MERGE keyed on Slug (bodies are Markdown, double any single quote).
+A publish adds missing articles and refreshes ones nobody has edited in the back office (`ModifiedBy IS NULL`). It never deletes,
+so back-office edits and retired articles are left alone.
+
 ## Custom fields
 
 Tenants add their own fields to clients, contacts, projects, tasks, vendors and bills (Settings > Custom fields, needs `settings.custom_fields`).

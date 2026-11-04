@@ -833,4 +833,7 @@ IF @PiloPermsNew = 1
     WHERE rp.PermissionCode = 'time.enter'
       AND NOT EXISTS (SELECT 1 FROM sec.RolePermission AS x WHERE x.TenantId = rp.TenantId AND x.RoleId = rp.RoleId AND x.PermissionCode = p.Code);
 
+-- starter Pilo Help articles: add missing, refresh unedited, never delete (edit them in Scripts/Seed/HelpArticles.sql)
+:r .\Seed\HelpArticles.sql
+
 EXEC sp_set_session_context N'IsPlatformAdmin', NULL;
