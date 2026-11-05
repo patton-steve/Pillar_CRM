@@ -1,8 +1,9 @@
 -- Rules on sec.AppUser:
 --   only a platform admin session can grant or remove IsPlatformAdmin
---   a new login (insert, or CanLogin/Status turned on) may not exceed Tenant.MaxUsers (people without a login don't count)
+--   a new login (insert, or CanLogin/Status turned on) may not exceed the max seats (Tenant.MaxUsers, else the plan's MaxSeats;
+--   handoff 26) (people without a login don't count)
 --   past the plan's included seats (admin.fn_TenantSeats) a new login is an extra paid seat: only someone with billing.manage may
---   add it (handoff 22). Pillar staff and calls with no user in session (sign-up, seeds) skip this check
+--   add it (handoff 22). Seats within the contract's CommittedSeats are already paid for, so they don't need it (handoff 26). Pillar staff and calls with no user in session (sign-up, seeds) skip this check
 --   admin.TenantSeatDaily keeps today's seat count for the monthly SEATS statement line
 --   a tenant keeps at least one ACTIVE owner who can log in
 --   sec.UserCredential follows the user's email and enabled state; disabling a user revokes its refresh tokens
@@ -24,10 +25,8 @@ BEGIN
               FROM inserted AS i LEFT JOIN deleted AS d ON d.Id = i.Id
               WHERE i.CanLogin = 1 AND i.Status <> 'DISABLED'
                 AND (d.Id IS NULL OR d.CanLogin = 0 OR d.Status = 'DISABLED')) AS t
-        CROSS APPLY admin.fn_Setting(t.TenantId, NULL, 'Tenant.MaxUsers') AS m
-        WHERE TRY_CAST(m.Value AS INT) IS NOT NULL
-          AND (SELECT COUNT(*) FROM sec.AppUser AS u
-               WHERE u.TenantId = t.TenantId AND u.CanLogin = 1 AND u.Status <> 'DISABLED') > TRY_CAST(m.Value AS INT))
+        CROSS APPLY admin.fn_TenantSeats(t.TenantId) AS m
+        WHERE m.MaxUsers IS NOT NULL AND m.UsedSeats > m.MaxUsers)
         THROW 50932, N'Your plan''s user limit has been reached.', 1;
 
     IF ISNULL(CAST(SESSION_CONTEXT(N'IsPlatformAdmin') AS BIT), 0) = 0
@@ -39,7 +38,7 @@ BEGIN
               WHERE i.CanLogin = 1 AND i.Status <> 'DISABLED'
                 AND (d.Id IS NULL OR d.CanLogin = 0 OR d.Status = 'DISABLED')) AS t
         CROSS APPLY admin.fn_TenantSeats(t.TenantId) AS s
-        WHERE s.ExtraSeats > 0
+        WHERE s.IncludedSeats IS NOT NULL AND s.UsedSeats > s.IncludedSeats AND s.UsedSeats > ISNULL(s.CommittedSeats, 0)
           AND NOT EXISTS (SELECT 1 FROM sec.fn_UserHasPermission(t.TenantId, CONVERT(INT, SESSION_CONTEXT(N'UserId')), 'billing.manage')))
         THROW 52220, N'All the seats on your plan are in use. Ask an owner or admin to add a seat.', 1;
 

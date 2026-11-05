@@ -11,7 +11,7 @@ CREATE TABLE sec.RefreshToken
     IssuedAt            DATETIME2(0)    NOT NULL CONSTRAINT DF_RefreshToken_IssuedAt DEFAULT (SYSUTCDATETIME()),
     ExpiresAt           DATETIME2(0)    NOT NULL,
     RevokedAt           DATETIME2(0)    NULL,
-    RevokedReason       VARCHAR(20)     NULL,          -- ROTATED, LOGOUT, REUSE, PASSWORD_RESET, DISABLED
+    RevokedReason       VARCHAR(20)     NULL,          -- ROTATED, GRACE, LOGOUT, REUSE, PASSWORD_RESET, DISABLED
     ReplacedByTokenId   INT             NULL,
     IpAddress           VARCHAR(45)     NULL,
     UserAgent           NVARCHAR(400)   NULL,

@@ -3,6 +3,8 @@
 -- CREDIT carries a negative balance forward from the prior statement.
 -- Handoff 22: PLAN is the plan price (Quantity = days, prorated on a mid-month upgrade), SEATS the extra seats over the plan's
 -- included seats at the month's peak (Quantity = extra seats), PILO the Pilo reports over the plan's allowance (Quantity = reports).
+-- Handoff 26: CAP is a negative line that brings the month's fees down to billable heads x the fee cap per head (Quantity = heads,
+-- UnitPrice = cap per head); SERVICE is a one-time charge (admin.PlatformCharge), with PlatformChargeId.
 CREATE TABLE admin.PlatformStatementLine
 (
     Id                  INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_PlatformStatementLine PRIMARY KEY CLUSTERED,
@@ -21,9 +23,10 @@ CREATE TABLE admin.PlatformStatementLine
     Amount              DECIMAL(19,2)   NOT NULL,
     Quantity            DECIMAL(19,2)   NULL,      -- handoff 22: appended
     UnitPrice           DECIMAL(19,4)   NULL,
+    PlatformChargeId    INT             NULL,      -- handoff 26: appended; the SERVICE line's charge
     CONSTRAINT UQ_PlatformStatementLine_Statement_Line UNIQUE (TenantId, StatementId, LineNumber),
     CONSTRAINT CK_PlatformStatementLine_LineType CHECK (LineType = 'FEE' OR LineType = 'REVERSAL' OR LineType = 'MINIMUM' OR LineType = 'CREDIT'
-        OR LineType = 'PLAN' OR LineType = 'SEATS' OR LineType = 'PILO'),
+        OR LineType = 'PLAN' OR LineType = 'SEATS' OR LineType = 'PILO' OR LineType = 'CAP' OR LineType = 'SERVICE'),
     CONSTRAINT FK_PlatformStatementLine_Statement FOREIGN KEY (TenantId, StatementId) REFERENCES admin.PlatformStatement (TenantId, Id),
     CONSTRAINT FK_PlatformStatementLine_Fee FOREIGN KEY (PlatformFeeId) REFERENCES admin.PlatformFee (Id)
 );

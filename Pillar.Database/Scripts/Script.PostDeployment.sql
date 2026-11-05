@@ -51,6 +51,8 @@ USING (VALUES
     ('InvoiceLineType',  'EXPENSE',     N'Reimbursable expense', 40),
     ('InvoiceLineType',  'ADJUSTMENT',  N'Correction or not-to-exceed limit', 50),
     ('InvoiceLineType',  'DISCOUNT',    N'Discount (negative amount)', 60),
+    ('InvoiceLineType',  'SURCHARGE',   N'Card processing fee for card-paying clients; not taxed, not in the platform fee', 70),
+    ('PaymentMethod',    'CREDIT_CARD', N'Credit card; profiles that usually pay this way can get the card processing fee', 10),
     ('BillStatus',       'DRAFT',       N'Being entered; editable', 10),
     ('BillStatus',       'SUBMITTED',   N'Waiting for approval', 20),
     ('BillStatus',       'OPEN',        N'Approved and unpaid; billable lines can be invoiced', 30),
@@ -271,7 +273,8 @@ USING (VALUES
     (N'FIXED',    N'Fixed Fee',   30, 'FIXED_FEE',  0),
     (N'EXPENSE',  N'Expense',     40, 'EXPENSE',    0),
     (N'ADJUST',   N'Adjustment',  50, 'ADJUSTMENT', 0),
-    (N'DISCOUNT', N'Discount',    60, 'DISCOUNT',   0)
+    (N'DISCOUNT', N'Discount',    60, 'DISCOUNT',   0),
+    (N'SURCHARGE', N'Card processing fee', 70, 'SURCHARGE', 0)
 ) AS s (Code, Name, SortOrder, SystemCode, IsDefault)
 ON t.Code = s.Code
 WHEN MATCHED THEN UPDATE SET Name = s.Name, SortOrder = s.SortOrder, SystemCode = s.SystemCode, IsDefault = s.IsDefault, IsLocked = 1
@@ -288,14 +291,37 @@ USING (VALUES
     ('ENTERPRISE', N'Enterprise',      0.025000, NULL, NULL, 0,      209.00,  20,    12.00,      500,        0.35,    40,   5000)
 ) AS s (Code, Name, FeeRate, PerInvoiceCap, MonthlyMinimum, IsDefault, MonthlyPrice, IncludedSeats, ExtraSeatPrice, IncludedAiReports, AiOveragePrice, SortOrder, IncludedAiSearches)
 ON t.Code = s.Code
-WHEN MATCHED THEN UPDATE SET Name = s.Name, FeeRate = s.FeeRate, PerInvoiceCap = s.PerInvoiceCap,
-    MonthlyMinimum = s.MonthlyMinimum, IsDefault = s.IsDefault, MonthlyPrice = s.MonthlyPrice, IncludedSeats = s.IncludedSeats,
-    ExtraSeatPrice = s.ExtraSeatPrice, IncludedAiReports = s.IncludedAiReports, AiOveragePrice = s.AiOveragePrice, SortOrder = s.SortOrder,
-    IncludedAiSearches = s.IncludedAiSearches
+-- Handoff 26: insert-only. Plans are edited in the back office plan editor (admin.usp_Plan_Save) from now on, so a deploy never
+-- overwrites a price. A new database gets these, then the versions below.
 WHEN NOT MATCHED THEN INSERT (Code, Name, FeeRate, PerInvoiceCap, MonthlyMinimum, IsDefault, MonthlyPrice, IncludedSeats, ExtraSeatPrice,
-    IncludedAiReports, AiOveragePrice, SortOrder, IncludedAiSearches)
+    IncludedAiReports, AiOveragePrice, SortOrder, IncludedAiSearches, ExcludeExpensesFromFee)
     VALUES (s.Code, s.Name, s.FeeRate, s.PerInvoiceCap, s.MonthlyMinimum, s.IsDefault, s.MonthlyPrice, s.IncludedSeats, s.ExtraSeatPrice,
-    s.IncludedAiReports, s.AiOveragePrice, s.SortOrder, s.IncludedAiSearches);
+    s.IncludedAiReports, s.AiOveragePrice, s.SortOrder, s.IncludedAiSearches, 0);
+
+-- Handoff 26, rerunnable: each plan gets a baseline version (its terms until now, with rebilled expenses still in the fee base),
+-- then Steve's new pricing (2026-11-04): 1% of the pre-tax subtotal, at most $75 per billable person a month, rebilled expenses
+-- left out of the base; prices, seats and Pilo unchanged. @NewPricingFrom is the date it starts (default the 1st of December 2026;
+-- change it here before the first deploy, or later with the plan editor). Nothing is dropped or recreated, and a version that
+-- was cancelled or edited in the plan editor is never added back.
+DECLARE @NewPricingFrom DATE = '2026-12-01';
+IF NOT EXISTS (SELECT 1 FROM admin.PlanVersion)
+    UPDATE admin.[Plan] SET ExcludeExpensesFromFee = 0, FeePerHeadCap = NULL;
+INSERT INTO admin.PlanVersion (PlanId, EffectiveFrom, FeeRate, PerInvoiceCap, MonthlyMinimum, FeePerHeadCap, ExcludeExpensesFromFee, MonthlyPrice,
+                               IncludedSeats, ExtraSeatPrice, MaxSeats, IncludedAiReports, AiOveragePrice, IncludedAiSearches, Reason, AppliedAt)
+SELECT p.Id, '2000-01-01', p.FeeRate, p.PerInvoiceCap, p.MonthlyMinimum, p.FeePerHeadCap, p.ExcludeExpensesFromFee, p.MonthlyPrice,
+       p.IncludedSeats, p.ExtraSeatPrice, p.MaxSeats, p.IncludedAiReports, p.AiOveragePrice, p.IncludedAiSearches,
+       N'Terms before the plan editor (handoff 26)', SYSUTCDATETIME()
+FROM admin.[Plan] AS p
+WHERE NOT EXISTS (SELECT 1 FROM admin.PlanVersion AS v WHERE v.PlanId = p.Id);
+INSERT INTO admin.PlanVersion (PlanId, EffectiveFrom, FeeRate, PerInvoiceCap, MonthlyMinimum, FeePerHeadCap, ExcludeExpensesFromFee, MonthlyPrice,
+                               IncludedSeats, ExtraSeatPrice, MaxSeats, IncludedAiReports, AiOveragePrice, IncludedAiSearches, Reason)
+SELECT p.Id, @NewPricingFrom, 0.010000, b.PerInvoiceCap, b.MonthlyMinimum, 75.00, 1, b.MonthlyPrice,
+       b.IncludedSeats, b.ExtraSeatPrice, b.MaxSeats, b.IncludedAiReports, b.AiOveragePrice, b.IncludedAiSearches,
+       N'New pricing (Steve 2026-11-04): 1% of invoiced, capped at $75 per billable person a month; expenses left out'
+FROM admin.[Plan] AS p
+CROSS APPLY admin.fn_PlanTerms(p.Id, DATEADD(DAY, -1, @NewPricingFrom)) AS b
+WHERE p.Code IN ('STANDARD', 'AI_POWERED', 'AI_PLUS', 'ENTERPRISE')
+  AND NOT EXISTS (SELECT 1 FROM admin.PlanVersion AS v WHERE v.PlanId = p.Id AND v.EffectiveFrom >= @NewPricingFrom);
 
 ------------------------------------------------------------------ Reports
 MERGE admin.ReportCategory AS t
@@ -366,16 +392,18 @@ EXEC ar.usp_SeedTenantInvoiceLayouts;
 
 MERGE lkp.DefaultPaymentMethod AS t
 USING (VALUES
-    (N'CHECK', N'Check',       10, 1),
-    (N'ACH',   N'ACH',         20, 0),
-    (N'WIRE',  N'Wire',        30, 0),
-    (N'CARD',  N'Credit Card', 40, 0),
-    (N'CASH',  N'Cash',        50, 0),
-    (N'OTHER', N'Other',       99, 0)
-) AS s (Code, Name, SortOrder, IsDefault)
+    (N'CHECK', N'Check',       10, 1, NULL),
+    (N'ACH',   N'ACH',         20, 0, NULL),
+    (N'WIRE',  N'Wire',        30, 0, NULL),
+    (N'ZELLE', N'Zelle',       35, 0, NULL),
+    (N'CARD',  N'Credit Card', 40, 0, 'CREDIT_CARD'),
+    (N'DEBIT', N'Debit Card',  45, 0, NULL),
+    (N'CASH',  N'Cash',        50, 0, NULL),
+    (N'OTHER', N'Other',       99, 0, NULL)
+) AS s (Code, Name, SortOrder, IsDefault, SystemCode)
 ON t.Code = s.Code
-WHEN MATCHED THEN UPDATE SET Name = s.Name, SortOrder = s.SortOrder, IsDefault = s.IsDefault
-WHEN NOT MATCHED THEN INSERT (Code, Name, SortOrder, IsDefault) VALUES (s.Code, s.Name, s.SortOrder, s.IsDefault);
+WHEN MATCHED THEN UPDATE SET Name = s.Name, SortOrder = s.SortOrder, IsDefault = s.IsDefault, SystemCode = s.SystemCode
+WHEN NOT MATCHED THEN INSERT (Code, Name, SortOrder, IsDefault, SystemCode) VALUES (s.Code, s.Name, s.SortOrder, s.IsDefault, s.SystemCode);
 
 MERGE lkp.DefaultBillStatus AS t
 USING (VALUES
@@ -481,6 +509,9 @@ USING (VALUES
     ('TimeEntry.EntryMode',          N'Time',     N'Time entry method',            N'HOUR, HALF_HOUR, QUARTER_HOUR = durations in that increment; EXACT = hours:minutes; START_END = start/end times or timer.', 'STRING', N'QUARTER_HOUR', N'["HOUR","HALF_HOUR","QUARTER_HOUR","EXACT","START_END"]', 'TENANT_EDIT', 0, 15),
     ('Invoice.GenerationMode',       N'Invoicing', N'Invoice creation',             N'MANUAL = create invoice runs by hand; AUTO_DRAFT = drafts are created nightly as billing periods close. Issuing is always manual.', 'STRING', N'MANUAL', N'["MANUAL","AUTO_DRAFT"]', 'TENANT_EDIT', 0, 10),
     ('Invoice.DefaultTaxRate',       N'Invoicing', N'Default sales tax rate',       N'Decimal rate applied to taxable lines on new invoices, e.g. 0.0725. Tax-exempt profiles are never taxed.', 'DECIMAL', N'0', NULL, 'TENANT_EDIT', 0, 20),
+    ('Invoice.CardSurchargeRate',    N'Invoicing', N'Card processing fee rate',     N'Added to invoices for billing profiles marked to pay the card fee, e.g. 0.03 = 3%. 0 = off. Up to 0.04. Check your state''s and card processor''s rules first; card networks generally cap it near 3% and it can''t apply to debit cards.', 'DECIMAL', N'0', NULL, 'TENANT_EDIT', 0, 30),
+    ('Invoice.CardSurchargeLabel',   N'Invoicing', N'Card processing fee label',    N'The invoice line''s description.', 'STRING', N'Credit card processing fee', NULL, 'TENANT_EDIT', 0, 32),
+    ('Invoice.CardSurchargeNote',    N'Invoicing', N'Card processing fee notice',   N'Printed on invoices that carry the fee. {rate} becomes the rate as a percent.', 'STRING', N'A {rate}% fee is added for payment by credit card. Pay by check, ACH or Zelle to avoid it.', NULL, 'TENANT_EDIT', 0, 34),
     ('AP.RequireApproval',           N'Payables',  N'Require bill approval',        N'Submitted bills and expense reports wait for approval. Off: submitting approves them.', 'BIT', N'1', NULL, 'TENANT_EDIT', 1, 10),
     ('Feature.ExpenseReports',       N'Platform',  N'Expense reports',              N'Users can submit their own expenses for reimbursement.', 'BIT', N'0', NULL, 'PLATFORM_ONLY', 0, 30),
     ('TimeEntry.RoundingMinutes',    N'Time',     N'Round time entries up to',     N'Minutes, for EXACT and START_END entry only; 0 = no rounding.',   'INT',     N'0',    N'["0","6","15","30"]',     'TENANT_EDIT',   0, 20),
@@ -488,6 +519,9 @@ USING (VALUES
     ('Platform.FeeRateOverride',     N'Platform', N'Fee rate override',            N'Replaces Plan.FeeRate for this tenant, e.g. 0.02 = 2%. NULL = plan rate (2.5%).', 'DECIMAL', NULL, NULL,                 'PLATFORM_ONLY', 0, 10),
     ('Platform.FeeCapOverride',      N'Platform', N'Fee cap per invoice',          N'Replaces Plan.PerInvoiceCap for this tenant (max fee on one invoice). NULL = plan cap.', 'DECIMAL', NULL, NULL,             'PLATFORM_ONLY', 0, 12),
     ('Platform.MonthlyMinimumOverride', N'Platform', N'Monthly minimum fee',       N'Replaces Plan.MonthlyMinimum on the monthly platform statement. NULL = plan minimum.', 'DECIMAL', NULL, NULL,          'PLATFORM_ONLY', 0, 14),
+    ('Platform.FeePerHeadCapOverride', N'Platform', N'Fee cap per billable person', N'Replaces Plan.FeePerHeadCap: the month''s fees are capped at billable people x this. NULL = plan cap.', 'DECIMAL', NULL, NULL, 'PLATFORM_ONLY', 0, 15),
+    ('Platform.ExcludeExpensesOverride', N'Platform', N'Leave expenses out of the fee', N'Replaces Plan.ExcludeExpensesFromFee: 1 = rebilled expense lines aren''t charged the fee. NULL = plan rule.', 'BIT', NULL, NULL, 'PLATFORM_ONLY', 0, 16),
+    ('Plan.MonthlyPriceOverride',    N'Platform', N'Monthly plan price',           N'Replaces Plan.MonthlyPrice for this tenant (a negotiated deal). NULL = plan price.', 'DECIMAL', NULL, NULL, 'PLATFORM_ONLY', 0, 17),
     ('Feature.CustomInvoiceLayouts', N'Platform', N'Custom invoice layouts',       N'Paid custom development: tenant may use custom RDL layouts.',     'BIT',     N'0',    NULL,                        'PLATFORM_ONLY', 0, 20),
     ('Feature.Pilo',                 N'Platform', N'Pilo',                         N'All Pilo AI features (Ask Pilo, Polish with Pilo). On for the AI plans.', 'BIT', N'0', NULL,                     'PLATFORM_ONLY', 0, 40),
     ('Feature.ExtendedBranding',     N'Platform', N'Extended branding',            N'In-app logo, colors and sign-in page branding. Enterprise only.', 'BIT', N'0', NULL,                       'PLATFORM_ONLY', 0, 50),
@@ -817,6 +851,12 @@ WHERE c.EmailVerifiedAt IS NULL AND c.PasswordHash IS NOT NULL AND t.Status <> '
 -- existing tenants get lookup lists added since they signed up (insert-only; tenant edits are kept)
 EXEC lkp.usp_SyncTenantLookups;
 
+-- handoff 25: tenants' existing Credit Card payment method gets its SystemCode (the sync above only adds rows)
+UPDATE pm SET SystemCode = d.SystemCode
+FROM lkp.PaymentMethod AS pm
+JOIN lkp.DefaultPaymentMethod AS d ON d.Id = pm.DefaultId
+WHERE d.SystemCode IS NOT NULL AND pm.SystemCode IS NULL;
+
 -- tenants without an INVOICE email template get the default one
 EXEC admin.usp_SeedTenantEmailTemplates;
 
@@ -835,5 +875,8 @@ IF @PiloPermsNew = 1
 
 -- starter Pilo Help articles: add missing, refresh unedited, never delete (edit them in Scripts/Seed/HelpArticles.sql)
 :r .\Seed\HelpArticles.sql
+
+-- handoff 26: plan versions and scheduled overrides whose date has come (also the daily job's work)
+EXEC admin.usp_PlanVersion_ApplyDue;
 
 EXEC sp_set_session_context N'IsPlatformAdmin', NULL;

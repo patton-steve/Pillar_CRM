@@ -29,7 +29,8 @@ BEGIN
         CASE WHEN @IncludeTimeDetail = 1 THEN d.Hours END           AS Hours,
         CASE WHEN @IncludeTimeDetail = 1 THEN d.RateApplied END     AS RateApplied,
         CASE WHEN @IncludeTimeDetail = 1 THEN d.AmountBillable END  AS AmountBillable,
-        CASE WHEN @IncludeTimeDetail = 1 THEN d.TimeDescription END AS TimeDescription
+        CASE WHEN @IncludeTimeDetail = 1 THEN d.TimeDescription END AS TimeDescription,
+        d.CardSurchargeNote
     FROM ar.vw_InvoiceDetail AS d
     WHERE d.TenantId = @TenantId
       AND d.InvoicePublicId = @InvoicePublicId

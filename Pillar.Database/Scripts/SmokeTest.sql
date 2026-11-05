@@ -17,6 +17,8 @@ Walks one tenant through the billing path end to end:
      support tickets, announcements, help articles, sample company.
   -> Today layouts per role, weekly hours goal, weekly expense reports with the timesheet and Pilo receipt reads, search, contacts.
   -> Ask Pilo: permissions, search allowance, usage log with prompts, saved report SQL/parameters/runs, rpt views and catalog, help by screen.
+  -> payment methods (Zelle, Debit Card, Credit Card) and the card processing fee line: added, kept out of the platform fee, waived.
+  -> billing configuration: plan editor and versions, scheduled overrides, tenant contract, one-time charges, fee cap per head, calculator.
 Step 1 signs up the way the app does since handoff 22: terms accepted, email verified, application sent, then approved by Pillar.
 Every step asserts its result and THROWs on the first failure. Everything runs in one transaction that is
 rolled back at the end, so the database is left as it was. Set @Keep = 1 to commit and inspect the rows.
@@ -180,8 +182,10 @@ IF NOT EXISTS (
 IF NOT EXISTS (
     SELECT 1 FROM admin.PlatformFee
     WHERE TenantId = @TenantId AND InvoiceId = @InvoiceId AND FeeStatus = 'ACCRUED'
-      AND FeeBaseAmount = 225.00 AND FeeRate = 0.025 AND ABS(FeeAmount - 5.63) <= 0.01)
-    THROW 59013, N'Platform fee was not accrued at 2.5% of 225.00.', 1;
+      AND FeeBaseAmount = 225.00
+      AND FeeRate = (SELECT tt.FeeRate FROM ar.Invoice AS i CROSS APPLY admin.fn_TenantTerms(@TenantId, i.InvoiceDate) AS tt WHERE i.Id = @InvoiceId)
+      AND ABS(FeeAmount - ROUND(225.00 * FeeRate, 2)) <= 0.01)
+    THROW 59013, N'Platform fee was not accrued on 225.00 at the plan''s rate for the invoice date (2.5% before the new pricing, 1% after).', 1;
 SELECT @Msg = CONCAT('ok 8  issued ', InvoiceNumber, ', due ', DueDate) FROM ar.Invoice WHERE Id = @InvoiceId;
 PRINT @Msg;
 
@@ -1097,7 +1101,7 @@ IF @NextSt IS NULL
                   WHERE s.Id = @NextSt
                     AND s.SubscriptionTotal = (SELECT SUM(Amount) FROM admin.PlatformStatementLine AS l
                                                WHERE l.StatementId = s.Id AND l.LineType IN ('PLAN', 'SEATS', 'PILO'))
-                    AND s.AmountDue = s.FeeTotal + s.MinimumAdjustment + s.SubscriptionTotal + s.CreditApplied)
+                    AND s.AmountDue = s.FeeTotal + s.CapAdjustment + s.MinimumAdjustment + s.SubscriptionTotal + s.ServiceTotal + s.CreditApplied)
     THROW 59138, N'The statement should prorate both plans, bill one extra seat at 12.00 and one Pilo report at 0.35, and add them up.', 1;
 
 -- the charge fails (retry tomorrow, Pillar's inbox), then Pillar marks it paid by check
@@ -1405,6 +1409,137 @@ IF NOT EXISTS (SELECT 1 FROM @Articles WHERE Id = @PiloArt)
    OR NOT EXISTS (SELECT 1 FROM admin.fn_Setting(@TenantId, NULL, 'Feature.PiloHelp') WHERE Value = N'1')
     THROW 59162, N'Help articles should be found by screen tag, and Pilo Help should be on.', 1;
 PRINT 'ok 27 Ask Pilo permissions, search allowance, usage log (declined not counted), saved report SQL, parameters and runs, rpt views, catalog, help by screen';
+
+------------------------------------------------------------------ 28. Payment methods and the card processing fee
+DECLARE @CardPm INT, @CardInv INT, @CardInv2 INT, @AdjTypeId INT, @DraftId INT, @TermId INT;
+SELECT @CardPm = Id FROM lkp.PaymentMethod WHERE TenantId = @TenantId AND SystemCode = 'CREDIT_CARD';
+IF @CardPm IS NULL
+   OR NOT EXISTS (SELECT 1 FROM lkp.PaymentMethod WHERE TenantId = @TenantId AND Code = N'ZELLE')
+   OR NOT EXISTS (SELECT 1 FROM lkp.PaymentMethod WHERE TenantId = @TenantId AND Code = N'DEBIT' AND SystemCode IS NULL)
+   OR NOT EXISTS (SELECT 1 FROM lkp.InvoiceLineType WHERE TenantId = @TenantId AND SystemCode = 'SURCHARGE')
+    THROW 59163, N'The tenant should have Zelle, Debit Card, Credit Card as CREDIT_CARD and the SURCHARGE line type.', 1;
+
+-- 3% on the default profile, which usually pays by card
+EXEC admin.usp_Setting_Set @TenantId = @TenantId, @SettingKey = 'Invoice.CardSurchargeRate', @Value = N'0.03';
+UPDATE crm.ClientBillingProfile SET PreferredPaymentMethodId = @CardPm, ApplyCardSurcharge = 1 WHERE Id = @ProfileId;
+SELECT @AdjTypeId = Id FROM lkp.InvoiceLineType WHERE TenantId = @TenantId AND SystemCode = 'ADJUSTMENT';
+SELECT @DraftId = Id FROM lkp.InvoiceStatus WHERE TenantId = @TenantId AND SystemCode = 'DRAFT';
+SELECT @TermId = PaymentTermId FROM crm.ClientBillingProfile WHERE Id = @ProfileId;
+
+-- a 1,000.00 draft gets a 30.00 fee line; issuing leaves the fee out of Pillar's platform fee base
+INSERT INTO ar.Invoice (TenantId, ClientId, BillingProfileId, InvoiceStatusId, PaymentTermId) VALUES (@TenantId, @ClientId, @ProfileId, @DraftId, @TermId);
+SET @CardInv = SCOPE_IDENTITY();
+INSERT INTO ar.InvoiceEntry (TenantId, InvoiceId, LineNumber, LineTypeId, Description, Quantity, UnitPrice, Amount, IsTaxable)
+VALUES (@TenantId, @CardInv, 1, @AdjTypeId, N'Card fee test work', 1, 1000, 1000, 0);
+EXEC ar.usp_Invoice_Recalculate @InvoiceId = @CardInv;
+IF NOT EXISTS (SELECT 1 FROM ar.InvoiceEntry AS e JOIN lkp.InvoiceLineType AS lt ON lt.TenantId = e.TenantId AND lt.Id = e.LineTypeId
+               WHERE e.InvoiceId = @CardInv AND lt.SystemCode = 'SURCHARGE' AND e.Amount = 30.00 AND e.IsTaxable = 0 AND e.LineNumber = 2)
+   OR NOT EXISTS (SELECT 1 FROM ar.Invoice WHERE Id = @CardInv AND SubTotal = 1030.00 AND CardSurchargeRate = 0.03 AND CardSurchargeNote LIKE N'A 3% fee%')
+    THROW 59164, N'A card-paying profile''s draft should get one 3% fee line, untaxed, with the notice.', 1;
+EXEC ar.usp_Invoice_Recalculate @InvoiceId = @CardInv;   -- again: still one line
+EXEC ar.usp_Invoice_Issue @InvoiceId = @CardInv;
+IF (SELECT COUNT(*) FROM ar.InvoiceEntry AS e JOIN lkp.InvoiceLineType AS lt ON lt.TenantId = e.TenantId AND lt.Id = e.LineTypeId
+    WHERE e.InvoiceId = @CardInv AND lt.SystemCode = 'SURCHARGE') <> 1
+   OR NOT EXISTS (SELECT 1 FROM admin.PlatformFee WHERE InvoiceId = @CardInv AND FeeBaseAmount = 1000.00 AND ReversalOfFeeId IS NULL)
+   OR NOT EXISTS (SELECT 1 FROM ar.vw_InvoiceDetail WHERE InvoiceId = @CardInv AND LineType = 'SURCHARGE' AND CardSurchargeNote LIKE N'%3%%')
+    THROW 59165, N'The issued invoice should keep one fee line, print the notice, and leave the fee out of the platform fee base.', 1;
+
+-- deleting the fee line on a draft waives it there; adding it back restores it
+INSERT INTO ar.Invoice (TenantId, ClientId, BillingProfileId, InvoiceStatusId, PaymentTermId) VALUES (@TenantId, @ClientId, @ProfileId, @DraftId, @TermId);
+SET @CardInv2 = SCOPE_IDENTITY();
+INSERT INTO ar.InvoiceEntry (TenantId, InvoiceId, LineNumber, LineTypeId, Description, Quantity, UnitPrice, Amount, IsTaxable)
+VALUES (@TenantId, @CardInv2, 1, @AdjTypeId, N'Waived fee test work', 1, 200, 200, 0);
+EXEC ar.usp_Invoice_Recalculate @InvoiceId = @CardInv2;
+DELETE e FROM ar.InvoiceEntry AS e JOIN lkp.InvoiceLineType AS lt ON lt.TenantId = e.TenantId AND lt.Id = e.LineTypeId
+WHERE e.InvoiceId = @CardInv2 AND lt.SystemCode = 'SURCHARGE';
+EXEC ar.usp_Invoice_Recalculate @InvoiceId = @CardInv2;
+IF NOT EXISTS (SELECT 1 FROM ar.Invoice WHERE Id = @CardInv2 AND CardSurchargeWaived = 1 AND SubTotal = 200.00 AND CardSurchargeNote IS NULL)
+    THROW 59166, N'Deleting the fee line on a draft should waive it, and recalculating shouldn''t add it back.', 1;
+EXEC ar.usp_Invoice_SetCardSurcharge @InvoiceId = @CardInv2, @Waive = 0;
+IF NOT EXISTS (SELECT 1 FROM ar.Invoice WHERE Id = @CardInv2 AND CardSurchargeWaived = 0 AND SubTotal = 206.00)
+    THROW 59167, N'Adding the fee back should restore a 6.00 line.', 1;
+EXEC ar.usp_Invoice_DeleteDraft @InvoiceId = @CardInv2;
+PRINT 'ok 28 payment methods (Zelle, Debit, Credit Card), card fee line on drafts, kept out of the platform fee, waived by deleting, added back';
+
+------------------------------------------------------------------ 29. Billing configuration: plan editor, scheduled terms, contract, one-time charge, fee cap per head
+DECLARE @CPlan INT, @CVer INT, @OvId INT, @CContract INT, @SvcCharge INT, @Month3 DATE = DATEADD(MONTH, 1, @NextMonth), @St3 INT,
+        @CustomCode VARCHAR(20) = CONCAT('SMOKE_', RIGHT(CONCAT('00000', @TenantId), 5)), @FarDate DATE = DATEADD(MONTH, 6, @NextMonth);
+DECLARE @Calc TABLE (PlanId INT, PlanCode VARCHAR(20), PlanName NVARCHAR(100), FeeBase DECIMAL(19,2), FeeBeforeCap DECIMAL(19,2), Heads INT,
+                     FeeCapAmount DECIMAL(19,2), CapAdjustment DECIMAL(19,2), FeeAfterCap DECIMAL(19,2), MinimumAdjustment DECIMAL(19,2),
+                     PlanCharge DECIMAL(19,2), BilledSeats INT, ExtraSeats INT, SeatCharge DECIMAL(19,2), OverReports INT, PiloCharge DECIMAL(19,2),
+                     Total DECIMAL(19,2), EffectivePct DECIMAL(9,4), ProcessorCost DECIMAL(19,2), PiloCost DECIMAL(19,2), Margin DECIMAL(19,2));
+EXEC sp_set_session_context N'IsPlatformAdmin', 1;
+
+-- a private custom plan, then a price change scheduled for the 1st of next month and cancelled
+EXEC admin.usp_Plan_Save @PlanId = @CPlan OUTPUT, @Code = @CustomCode, @Name = N'Smoke custom', @IsPublic = 0,
+     @FeeRate = 0.01, @FeePerHeadCap = 75, @ExcludeExpensesFromFee = 1, @MonthlyPrice = 50, @IncludedSeats = 3, @ExtraSeatPrice = 12,
+     @IncludedAiReports = 100, @AiOveragePrice = 0.50, @IncludedAiSearches = 1000, @Reason = N'Smoke test custom deal';
+IF NOT EXISTS (SELECT 1 FROM admin.[Plan] WHERE Id = @CPlan AND IsPublic = 0 AND MonthlyPrice = 50 AND FeePerHeadCap = 75 AND ExcludeExpensesFromFee = 1)
+   OR (SELECT COUNT(*) FROM admin.PlanVersion WHERE PlanId = @CPlan AND CancelledAt IS NULL) <> 1
+    THROW 59168, N'A new private plan should be saved with its first version.', 1;
+EXEC admin.usp_Plan_Save @PlanId = @CPlan, @EffectiveFrom = @NextMonth,
+     @FeeRate = 0.01, @FeePerHeadCap = 75, @ExcludeExpensesFromFee = 1, @MonthlyPrice = 60, @IncludedSeats = 3, @ExtraSeatPrice = 12,
+     @IncludedAiReports = 100, @AiOveragePrice = 0.50, @IncludedAiSearches = 1000, @Reason = N'Smoke test price change';
+SELECT @CVer = Id FROM admin.PlanVersion WHERE PlanId = @CPlan AND EffectiveFrom = @NextMonth AND CancelledAt IS NULL;
+IF @CVer IS NULL
+   OR NOT EXISTS (SELECT 1 FROM admin.fn_PlanTerms(@CPlan, CAST(SYSUTCDATETIME() AS DATE)) WHERE MonthlyPrice = 50)
+   OR NOT EXISTS (SELECT 1 FROM admin.fn_PlanTerms(@CPlan, @NextMonth) WHERE MonthlyPrice = 60 AND PlanVersionId = @CVer)
+   OR NOT EXISTS (SELECT 1 FROM admin.[Plan] WHERE Id = @CPlan AND MonthlyPrice = 50)
+    THROW 59169, N'A price change for next month should be scheduled, not applied to the plan today.', 1;
+EXEC admin.usp_PlanVersion_Cancel @PlanVersionId = @CVer, @Reason = N'Smoke test cancel';
+IF NOT EXISTS (SELECT 1 FROM admin.fn_PlanTerms(@CPlan, @NextMonth) WHERE MonthlyPrice = 50)
+    THROW 59169, N'Cancelling the scheduled version should keep the current price.', 1;
+
+-- an override scheduled for later doesn't change today's value, and can be cancelled
+EXEC admin.usp_Tenant_SetOverride @TenantId = @TenantId, @SettingKey = 'Seats.IncludedOverride', @Value = N'5', @EffectiveDate = @FarDate,
+     @Reason = N'Smoke test scheduled override';
+SELECT @OvId = MAX(Id) FROM admin.TenantOverrideChange WHERE TenantId = @TenantId AND SettingKey = 'Seats.IncludedOverride' AND AppliedAt IS NULL;
+IF @OvId IS NULL
+   OR NOT EXISTS (SELECT 1 FROM admin.fn_OverrideAsOf(@TenantId, 'Seats.IncludedOverride', CAST(SYSUTCDATETIME() AS DATE)) WHERE Value = N'2')
+   OR NOT EXISTS (SELECT 1 FROM admin.fn_OverrideAsOf(@TenantId, 'Seats.IncludedOverride', @FarDate) WHERE Value = N'5' AND ChangedOn = @FarDate)
+   OR NOT EXISTS (SELECT 1 FROM admin.TenantSetting WHERE TenantId = @TenantId AND SettingKey = 'Seats.IncludedOverride' AND Value = N'2')
+    THROW 59170, N'A scheduled override should apply only from its date.', 1;
+EXEC admin.usp_TenantOverrideChange_Cancel @OverrideChangeId = @OvId, @Reason = N'Smoke test cancel';
+IF NOT EXISTS (SELECT 1 FROM admin.fn_OverrideAsOf(@TenantId, 'Seats.IncludedOverride', @FarDate) WHERE Value = N'2')
+    THROW 59170, N'Cancelling the scheduled override should keep the current value.', 1;
+
+-- an annual contract: 10% off the plan, 5 committed seats
+EXEC admin.usp_TenantContract_Save @TenantId = @TenantId, @Term = 'ANNUAL', @StartDate = @ThisMonth, @DiscountPct = 0.10, @CommittedSeats = 5,
+     @Reason = N'Smoke test contract', @ContractId = @CContract OUTPUT;
+IF NOT EXISTS (SELECT 1 FROM admin.fn_TenantSeats(@TenantId) WHERE CommittedSeats = 5)
+   OR NOT EXISTS (SELECT 1 FROM admin.fn_TenantTerms(@TenantId, CAST(SYSUTCDATETIME() AS DATE)) WHERE ContractId = @CContract AND DiscountPct = 0.10 AND CommittedSeats = 5)
+    THROW 59171, N'The contract should give 5 committed seats and a 10% discount.', 1;
+
+-- a one-time onboarding charge and a 5.00 fee cap per head; the statement after next carries the step 28 fee, capped
+EXEC admin.usp_PlatformCharge_Add @TenantId = @TenantId, @Kind = 'ONBOARDING', @Description = N'Onboarding and data import', @Amount = 250,
+     @Reason = N'Smoke test onboarding', @ChargeId = @SvcCharge OUTPUT;
+EXEC admin.usp_Tenant_SetOverride @TenantId = @TenantId, @SettingKey = 'Platform.FeePerHeadCapOverride', @Value = N'5', @Reason = N'Smoke test cap';
+EXEC admin.usp_PlatformStatement_Generate @PeriodStart = @Month3, @TenantId = @TenantId;
+SELECT @St3 = Id FROM admin.PlatformStatement WHERE TenantId = @TenantId AND PeriodStart = @Month3 AND Status <> 'VOID';
+IF @St3 IS NULL
+   OR NOT EXISTS (SELECT 1 FROM admin.PlatformStatement AS s
+                  WHERE s.Id = @St3 AND s.FeeTotal > 5 AND s.FeeCapAmount = 5.00 AND s.BillableHeads = 1 AND s.CapAdjustment = 5.00 - s.FeeTotal
+                    AND s.ServiceTotal = 250.00
+                    AND s.AmountDue = s.FeeTotal + s.CapAdjustment + s.MinimumAdjustment + s.SubscriptionTotal + s.ServiceTotal + s.CreditApplied)
+   OR NOT EXISTS (SELECT 1 FROM admin.PlatformStatementLine AS l JOIN admin.PlatformStatement AS s ON s.Id = l.StatementId
+                  WHERE l.StatementId = @St3 AND l.LineType = 'CAP' AND l.Amount = s.CapAdjustment)
+   OR NOT EXISTS (SELECT 1 FROM admin.PlatformStatementLine WHERE StatementId = @St3 AND LineType = 'SERVICE' AND PlatformChargeId = @SvcCharge AND Amount = 250.00)
+   OR NOT EXISTS (SELECT 1 FROM admin.PlatformStatementLine WHERE StatementId = @St3 AND LineType = 'PLAN' AND Description LIKE N'%10% contract discount%')
+   OR NOT EXISTS (SELECT 1 FROM admin.PlatformCharge WHERE Id = @SvcCharge AND Status = 'BILLED' AND StatementId = @St3)
+    THROW 59172, N'The statement should cap the fee at 5.00 for one head, bill the 250.00 onboarding charge and show the contract discount.', 1;
+EXEC admin.usp_PlatformStatement_Void @StatementId = @St3, @Reason = N'Smoke test: release the charge';
+IF NOT EXISTS (SELECT 1 FROM admin.PlatformCharge WHERE Id = @SvcCharge AND Status = 'PENDING' AND StatementId IS NULL)
+    THROW 59173, N'Voiding the statement should put the charge back to pending.', 1;
+
+-- the pricing calculator: 100,000 billed by 5 people at 1% capped at 75 a head is 375.00 in fees
+INSERT INTO @Calc EXEC admin.usp_PricingCalculator @MonthlyBilled = 100000, @Heads = 5, @Logins = 5, @PlanCode = 'ENTERPRISE',
+     @FeeRate = 0.01, @FeePerHeadCap = 75, @MonthlyMinimum = 0;
+IF NOT EXISTS (SELECT 1 FROM @Calc WHERE PlanCode = 'ENTERPRISE' AND FeeBeforeCap = 1000.00 AND FeeCapAmount = 375.00
+               AND CapAdjustment = -625.00 AND FeeAfterCap = 375.00 AND Total >= 375.00)
+    THROW 59174, N'The calculator should cap 1,000.00 in fees at 375.00 for 5 heads.', 1;
+EXEC admin.usp_TenantBilling_Projection @TenantId = @TenantId;   -- runs; its numbers depend on the day of the month
+EXEC sp_set_session_context N'IsPlatformAdmin', NULL;
+PRINT 'ok 29 plan editor (private plan, scheduled and cancelled price), scheduled override, contract discount and committed seats, one-time charge, fee cap per head, calculator';
 
 ------------------------------------------------------------------ Done
 IF @Keep = 1 COMMIT; ELSE ROLLBACK;

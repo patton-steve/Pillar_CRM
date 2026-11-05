@@ -3,7 +3,7 @@
 -- Tenants can read their own statements (Settings > Billing); only Pillar's procs write them.
 -- Status: OPEN (to be charged), PAST_DUE (a charge failed), PAID, VOID. A statement with nothing due is PAID at creation.
 -- Handoff 22: SubscriptionTotal is the PLAN, SEATS and PILO lines; AmountDue = FeeTotal + MinimumAdjustment + SubscriptionTotal
--- + CreditApplied (floored at 0). A failed charge sets NextRetryAt (1, 3 then 5 days later; NULL after the fourth failure).
+-- + CreditApplied (floored at 0). Handoff 26: AmountDue also adds CapAdjustment and ServiceTotal; MINIMUM tops up the fees after the cap. A failed charge sets NextRetryAt (1, 3 then 5 days later; NULL after the fourth failure).
 -- No lockout in phase 1: the app shows a banner while a statement is PAST_DUE.
 CREATE TABLE admin.PlatformStatement
 (
@@ -32,6 +32,11 @@ CREATE TABLE admin.PlatformStatement
     RowVer              ROWVERSION      NOT NULL,
     SubscriptionTotal   DECIMAL(19,2)   NOT NULL CONSTRAINT DF_PlatformStatement_SubscriptionTotal DEFAULT (0),  -- handoff 22: appended
     NextRetryAt         DATETIME2(0)    NULL,      -- when the API's retry job charges the card again
+    -- handoff 26, appended:
+    CapAdjustment       DECIMAL(19,2)   NOT NULL CONSTRAINT DF_PlatformStatement_CapAdjustment DEFAULT (0),   -- the CAP line (0 or negative)
+    ServiceTotal        DECIMAL(19,2)   NOT NULL CONSTRAINT DF_PlatformStatement_ServiceTotal DEFAULT (0),    -- SERVICE lines
+    BillableHeads       INT             NULL,      -- distinct people with billable time on the month's issued invoices
+    FeeCapAmount        DECIMAL(19,2)   NULL,      -- heads x cap per head; NULL = no cap
     CONSTRAINT UQ_PlatformStatement_PublicId UNIQUE (PublicId),
     CONSTRAINT UQ_PlatformStatement_Tenant_Id UNIQUE (TenantId, Id),
     CONSTRAINT CK_PlatformStatement_Status CHECK (Status IN ('OPEN', 'PAST_DUE', 'PAID', 'VOID')),

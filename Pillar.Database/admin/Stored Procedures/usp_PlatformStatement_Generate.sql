@@ -1,16 +1,21 @@
 -- Month-end job (IsPlatformAdmin): one statement per tenant for @PeriodStart's month (default: last month, UTC).
 -- Bills every fee and reversal not yet on a statement and accrued before the month ended, then:
+--   CAP      handoff 26: brings the fees down to billable heads (admin.fn_BillableHeads) x the fee cap per head, when over it
 --   PLAN     the plan price for the days the account was active in the month (from ApprovedAt, or CreatedAt for older tenants,
---            to CancelledAt), split by day across plan changes (admin.TenantPlanChange), so a mid-month upgrade is prorated
---   SEATS    logins past the plan's included seats at the month's peak (admin.TenantSeatDaily; with no rows, today's count),
---            times the extra seat price (Steve 2026-10-22: peak, not prorated)
---   PILO     Pilo reports past the plan's allowance, times the overage price, capped at Pilo.OverageCapAmount
---   MINIMUM  tops the month's fees up to Platform.MonthlyMinimumOverride / Plan.MonthlyMinimum
+--            to CancelledAt). Worked out day by day from admin.fn_TenantTerms, so a mid-month plan change, a new plan version
+--            or a Plan.MonthlyPriceOverride starting mid-month each prorate by day. The contract's DiscountPct comes off.
+--   SEATS    logins past the included seats at the month's peak (admin.TenantSeatDaily; with no rows, today's count), or the
+--            contract's CommittedSeats when higher, times the extra seat price (Steve 2026-10-22: peak, not prorated)
+--   PILO     Pilo reports past the allowance, times the overage price, capped at Pilo.OverageCapAmount
+--   SERVICE  handoff 26: one-time charges (admin.PlatformCharge, NEXT_STATEMENT) dated before the month ended
+--   MINIMUM  tops the month's fees (after the cap) up to the monthly minimum
 --            (skipped in the tenant's first month, i.e. tenants created after the period started)
 --   CREDIT   applies the credit carried forward by the tenant's previous statement
--- Seats and Pilo use the plan in effect at the end of the month. Accounts still in SETUP or PENDING_REVIEW, and DECLINED ones,
--- are skipped. A negative total is carried forward (AmountDue 0, CreditForward > 0). Nothing to bill and nothing to carry = no
--- statement. Rerunnable: tenants that already have a live statement for the month are skipped. @TenantId limits the run to one tenant.
+-- Fee cap, seats, Pilo and the minimum use the terms in force on the last active day of the month. The amounts come from
+-- admin.fn_PlatformBillCalc, the same calculation the projection and the pricing calculator use.
+-- Accounts still in SETUP or PENDING_REVIEW, and DECLINED ones, are skipped. A negative total is carried forward (AmountDue 0,
+-- CreditForward > 0). Nothing to bill and nothing to carry = no statement. Rerunnable: tenants that already have a live
+-- statement for the month are skipped. @TenantId limits the run to one tenant.
 CREATE PROCEDURE admin.usp_PlatformStatement_Generate
     @PeriodStart    DATE = NULL,
     @TenantId       INT = NULL
@@ -30,14 +35,18 @@ BEGIN
             @Cutoff DATETIME2(0) = DATEADD(MONTH, 1, CAST(@PeriodStart AS DATETIME2(0))),
             @DaysInMonth INT = DAY(EOMONTH(@PeriodStart));
 
-    DECLARE @T INT, @StatementId INT, @FeeTotal DECIMAL(19,2), @Minimum DECIMAL(19,2), @MinAdj DECIMAL(19,2),
-            @Credit DECIMAL(19,2), @Net DECIMAL(19,2), @Line INT, @SubTotal DECIMAL(19,2),
-            @ActiveFrom DATE, @ActiveTo DATE, @EndPlanId INT, @Peak INT, @Included INT, @SeatPrice DECIMAL(19,2),
-            @Reports INT, @IncludedReports INT, @ReportPrice DECIMAL(19,2), @Cap DECIMAL(19,2), @PiloAmount DECIMAL(19,2);
+    DECLARE @T INT, @StatementId INT, @FeeTotal DECIMAL(19,2), @Minimum DECIMAL(19,2), @Credit DECIMAL(19,2), @Net DECIMAL(19,2),
+            @Line INT, @SubTotal DECIMAL(19,2), @ServiceTotal DECIMAL(19,2), @PlanCharge DECIMAL(19,2), @IsActive BIT,
+            @ActiveFrom DATE, @ActiveTo DATE, @LastDay DATE, @Peak INT, @Heads INT, @Reports INT, @CreatedAt DATETIME2(0),
+            @HeadCap DECIMAL(19,2), @Included INT, @Committed INT, @SeatPrice DECIMAL(19,2), @IncludedReports INT,
+            @ReportPrice DECIMAL(19,2), @PiloCap DECIMAL(19,2),
+            @CapAdj DECIMAL(19,2), @CapAmount DECIMAL(19,2), @MinAdj DECIMAL(19,2), @BilledSeats INT, @ExtraSeats INT,
+            @SeatCharge DECIMAL(19,2), @OverReports INT, @PiloCharge DECIMAL(19,2), @PiloCapped BIT, @CalcHeads INT;
 
-    CREATE TABLE #seg (StartDate DATE NOT NULL, EndDate DATE NOT NULL, PlanId INT NOT NULL);
+    CREATE TABLE #day (D DATE NOT NULL PRIMARY KEY, PlanId INT NOT NULL, PlanName NVARCHAR(100) NOT NULL, Price DECIMAL(19,2) NOT NULL,
+                       DiscountPct DECIMAL(5,4) NOT NULL);
     CREATE TABLE #sub (Sort INT NOT NULL, LineType VARCHAR(10) NOT NULL, Description NVARCHAR(200) NOT NULL,
-                       Quantity DECIMAL(19,2) NULL, UnitPrice DECIMAL(19,4) NULL, Amount DECIMAL(19,2) NOT NULL);
+                       Quantity DECIMAL(19,2) NULL, UnitPrice DECIMAL(19,4) NULL, Amount DECIMAL(19,2) NOT NULL, ChargeId INT NULL);
 
     DECLARE tenants CURSOR LOCAL FAST_FORWARD FOR
         SELECT t.Id FROM admin.Tenant AS t
@@ -52,9 +61,9 @@ BEGIN
 
     WHILE @@FETCH_STATUS = 0
     BEGIN
-        TRUNCATE TABLE #seg;
+        TRUNCATE TABLE #day;
         TRUNCATE TABLE #sub;
-        SET @EndPlanId = NULL;
+        SELECT @Peak = NULL, @Reports = NULL, @Committed = NULL, @PlanCharge = 0;
 
         BEGIN TRAN;
 
@@ -62,63 +71,60 @@ BEGIN
         FROM admin.PlatformFee AS f WITH (UPDLOCK)
         WHERE f.TenantId = @T AND f.PlatformStatementId IS NULL AND f.AccruedAt < @Cutoff;
 
-        SELECT @Minimum = CASE WHEN t.CreatedAt < CAST(@PeriodStart AS DATETIME2(0))
-                               THEN COALESCE(TRY_CAST(m.Value AS DECIMAL(19,2)), p.MonthlyMinimum) END
-        FROM admin.Tenant AS t
-        JOIN admin.[Plan] AS p ON p.Id = t.PlanId
-        OUTER APPLY admin.fn_Setting(t.Id, NULL, 'Platform.MonthlyMinimumOverride') AS m
-        WHERE t.Id = @T;
-
-        SET @MinAdj = CASE WHEN @Minimum > 0 AND @FeeTotal < @Minimum
-                           THEN @Minimum - CASE WHEN @FeeTotal > 0 THEN @FeeTotal ELSE 0 END ELSE 0 END;
-
         SELECT @Credit = -ISNULL((SELECT TOP (1) s.CreditForward FROM admin.PlatformStatement AS s
                                   WHERE s.TenantId = @T AND s.Status <> 'VOID' AND s.PeriodStart < @PeriodStart
                                   ORDER BY s.PeriodStart DESC), 0);
 
-        -- the days the account was active this month, split by plan
-        SELECT @ActiveFrom = CASE WHEN CAST(COALESCE(ApprovedAt, CreatedAt) AS DATE) > @PeriodStart
+        -- the days the account was active this month
+        SELECT @CreatedAt = CreatedAt,
+               @ActiveFrom = CASE WHEN CAST(COALESCE(ApprovedAt, CreatedAt) AS DATE) > @PeriodStart
                                   THEN CAST(COALESCE(ApprovedAt, CreatedAt) AS DATE) ELSE @PeriodStart END,
                @ActiveTo = CASE WHEN CancelledAt IS NOT NULL AND CAST(CancelledAt AS DATE) < @NextStart
                                 THEN CAST(CancelledAt AS DATE) ELSE @NextStart END
         FROM admin.Tenant WHERE Id = @T;
+        SET @IsActive = IIF(@ActiveFrom < @ActiveTo, 1, 0);
+        SET @LastDay = IIF(@IsActive = 1, DATEADD(DAY, -1, @ActiveTo), @PeriodEnd);
 
-        IF @ActiveFrom < @ActiveTo
+        -- the terms on the last active day
+        SELECT @HeadCap = FeePerHeadCap, @Included = IncludedSeats, @SeatPrice = ExtraSeatPrice, @IncludedReports = IncludedAiReports,
+               @ReportPrice = AiOveragePrice, @PiloCap = PiloOverageCap,
+               @Committed = IIF(@IsActive = 1, CommittedSeats, NULL),
+               @Minimum = CASE WHEN @CreatedAt < CAST(@PeriodStart AS DATETIME2(0)) THEN MonthlyMinimum END
+        FROM admin.fn_TenantTerms(@T, @LastDay);
+
+        IF @IsActive = 1
         BEGIN
-            WITH pts AS (
-                SELECT @ActiveFrom AS StartDate
-                UNION
-                SELECT c.EffectiveDate FROM admin.TenantPlanChange AS c
-                WHERE c.TenantId = @T AND c.Status = 'APPLIED' AND c.EffectiveDate > @ActiveFrom AND c.EffectiveDate < @ActiveTo
-            ), seg AS (
-                SELECT StartDate, LEAD(StartDate, 1, @ActiveTo) OVER (ORDER BY StartDate) AS EndDate FROM pts
+            -- PLAN: day by day, grouped into runs of the same plan, price and discount
+            INSERT INTO #day (D, PlanId, PlanName, Price, DiscountPct)
+            SELECT d.D, tt.PlanId, tt.PlanName, tt.MonthlyPrice, tt.DiscountPct
+            FROM (SELECT DATEADD(DAY, tally.Num, @ActiveFrom) AS D
+                  FROM (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13),(14),(15),(16),(17),(18),(19),(20),
+                               (21),(22),(23),(24),(25),(26),(27),(28),(29),(30)) AS tally (Num)
+                  WHERE DATEADD(DAY, tally.Num, @ActiveFrom) < @ActiveTo) AS d
+            CROSS APPLY admin.fn_TenantTerms(@T, d.D) AS tt;
+
+            WITH runs AS (
+                SELECT D, PlanId, PlanName, Price, DiscountPct,
+                       DATEDIFF(DAY, @PeriodStart, D) - ROW_NUMBER() OVER (PARTITION BY PlanId, Price, DiscountPct ORDER BY D) AS Grp
+                FROM #day
+            ), g AS (
+                SELECT PlanId, PlanName, Price, DiscountPct, MIN(D) AS StartDate, MAX(D) AS EndDate, COUNT(*) AS Days
+                FROM runs GROUP BY PlanId, PlanName, Price, DiscountPct, Grp
             )
-            INSERT INTO #seg (StartDate, EndDate, PlanId)
-            SELECT s.StartDate, s.EndDate,
-                   COALESCE((SELECT TOP (1) c.ToPlanId FROM admin.TenantPlanChange AS c
-                             WHERE c.TenantId = @T AND c.Status = 'APPLIED' AND c.EffectiveDate <= s.StartDate
-                             ORDER BY c.EffectiveDate DESC, c.Id DESC),
-                            (SELECT TOP (1) c.FromPlanId FROM admin.TenantPlanChange AS c
-                             WHERE c.TenantId = @T AND c.Status = 'APPLIED' AND c.EffectiveDate > s.StartDate
-                             ORDER BY c.EffectiveDate, c.Id),
-                            (SELECT t.PlanId FROM admin.Tenant AS t WHERE t.Id = @T))
-            FROM seg AS s;
-
-            SELECT TOP (1) @EndPlanId = PlanId FROM #seg ORDER BY StartDate DESC;
-
             INSERT INTO #sub (Sort, LineType, Description, Quantity, UnitPrice, Amount)
             SELECT 10, 'PLAN',
-                   CASE WHEN DATEDIFF(DAY, s.StartDate, s.EndDate) = @DaysInMonth
-                        THEN CONCAT(p.Name, N' plan, ', FORMAT(@PeriodStart, 'MMMM yyyy', 'en-US'))
-                        ELSE CONCAT(p.Name, N' plan, ', FORMAT(s.StartDate, 'MMM d', 'en-US'), N' to ',
-                                    FORMAT(DATEADD(DAY, -1, s.EndDate), 'MMM d', 'en-US'), N' (prorated)') END,
-                   DATEDIFF(DAY, s.StartDate, s.EndDate), p.MonthlyPrice,
-                   ROUND(p.MonthlyPrice * DATEDIFF(DAY, s.StartDate, s.EndDate) / @DaysInMonth, 2)
-            FROM #seg AS s
-            JOIN admin.[Plan] AS p ON p.Id = s.PlanId
-            WHERE p.MonthlyPrice > 0 AND s.EndDate > s.StartDate;
+                   LEFT(CONCAT(CASE WHEN g.Days = @DaysInMonth
+                                    THEN CONCAT(g.PlanName, N' plan, ', FORMAT(@PeriodStart, 'MMMM yyyy', 'en-US'))
+                                    ELSE CONCAT(g.PlanName, N' plan, ', FORMAT(g.StartDate, 'MMM d', 'en-US'), N' to ',
+                                                FORMAT(g.EndDate, 'MMM d', 'en-US'), N' (prorated)') END,
+                               CASE WHEN g.DiscountPct > 0 THEN CONCAT(N', ', FORMAT(g.DiscountPct * 100, '0.##'), N'% contract discount') END), 200),
+                   g.Days, g.Price,
+                   ROUND(ROUND(g.Price * g.Days / @DaysInMonth, 2) * (1 - g.DiscountPct), 2)
+            FROM g
+            WHERE g.Price > 0;
+            SELECT @PlanCharge = ISNULL(SUM(Amount), 0) FROM #sub WHERE LineType = 'PLAN';
 
-            -- extra seats at the month's peak
+            -- seats at the month's peak
             SELECT @Peak = MAX(v.Seats)
             FROM (SELECT d.PeakSeats AS Seats FROM admin.TenantSeatDaily AS d
                   WHERE d.TenantId = @T AND d.SeatDate >= @ActiveFrom AND d.SeatDate < @ActiveTo
@@ -127,47 +133,52 @@ BEGIN
                   WHERE d.TenantId = @T AND d.SeatDate < @ActiveFrom ORDER BY d.SeatDate DESC) AS v;
             IF @Peak IS NULL SELECT @Peak = UsedSeats FROM admin.fn_TenantSeats(@T);
 
-            SELECT @Included = COALESCE(TRY_CONVERT(INT, io.Value), p.IncludedSeats),
-                   @SeatPrice = COALESCE(TRY_CONVERT(DECIMAL(19,2), po.Value), p.ExtraSeatPrice),
-                   @IncludedReports = COALESCE(TRY_CONVERT(INT, ro.Value), p.IncludedAiReports),
-                   @ReportPrice = p.AiOveragePrice,
-                   @Cap = TRY_CONVERT(DECIMAL(19,2), cap.Value)
-            FROM admin.[Plan] AS p
-            OUTER APPLY admin.fn_Setting(@T, NULL, 'Seats.IncludedOverride') AS io
-            OUTER APPLY admin.fn_Setting(@T, NULL, 'Seats.ExtraPriceOverride') AS po
-            OUTER APPLY admin.fn_Setting(@T, NULL, 'Pilo.MonthlyReportsOverride') AS ro
-            OUTER APPLY admin.fn_Setting(@T, NULL, 'Pilo.OverageCapAmount') AS cap
-            WHERE p.Id = @EndPlanId;
-
-            IF @Included IS NOT NULL AND @Peak > @Included AND @SeatPrice > 0
-                INSERT INTO #sub (Sort, LineType, Description, Quantity, UnitPrice, Amount)
-                VALUES (20, 'SEATS', CONCAT(@Peak - @Included, N' extra seat', IIF(@Peak - @Included = 1, N'', N's'),
-                                            N' (', @Peak, N' at the month''s peak, ', @Included, N' included)'),
-                        @Peak - @Included, @SeatPrice, (@Peak - @Included) * @SeatPrice);
-
-            -- Pilo reports past the allowance
             SELECT @Reports = COUNT(*) FROM ai.Generation
             WHERE TenantId = @T AND CountsTowardQuota = 1 AND CreatedAt >= CAST(@PeriodStart AS DATETIME2(0)) AND CreatedAt < @Cutoff;
-            IF @Reports > @IncludedReports AND @ReportPrice > 0
-            BEGIN
-                SET @PiloAmount = (@Reports - @IncludedReports) * @ReportPrice;
-                IF @Cap IS NOT NULL AND @PiloAmount > @Cap SET @PiloAmount = @Cap;
-                INSERT INTO #sub (Sort, LineType, Description, Quantity, UnitPrice, Amount)
-                VALUES (30, 'PILO', CONCAT(@Reports - @IncludedReports, N' Pilo reports over the ', @IncludedReports, N' included',
-                                           IIF(@Cap IS NOT NULL AND (@Reports - @IncludedReports) * @ReportPrice > @Cap, N' (capped)', N'')),
-                        @Reports - @IncludedReports, @ReportPrice, @PiloAmount);
-            END;
         END;
 
-        SELECT @SubTotal = ISNULL(SUM(Amount), 0) FROM #sub;
-        SET @Net = @FeeTotal + @MinAdj + @SubTotal + @Credit;
+        SELECT @Heads = Heads FROM admin.fn_BillableHeads(@T, @PeriodStart);
+
+        SELECT @CapAdj = c.CapAdjustment, @CapAmount = c.FeeCapAmount, @CalcHeads = c.Heads, @MinAdj = c.MinimumAdjustment,
+               @BilledSeats = c.BilledSeats, @ExtraSeats = c.ExtraSeats, @SeatCharge = c.SeatCharge,
+               @OverReports = c.OverReports, @PiloCharge = c.PiloCharge, @PiloCapped = c.PiloCapped
+        FROM admin.fn_PlatformBillCalc(@FeeTotal, @Heads, @HeadCap, @Minimum, @PlanCharge, @Peak, @Included, @Committed, @SeatPrice,
+                                       @Reports, @IncludedReports, @ReportPrice, @PiloCap) AS c;
+
+        IF @CapAdj <> 0
+            INSERT INTO #sub (Sort, LineType, Description, Quantity, UnitPrice, Amount)
+            VALUES (5, 'CAP', CONCAT(N'Fee cap: ', @CalcHeads, N' billable ', IIF(@CalcHeads = 1, N'person', N'people'), N' x ',
+                                     FORMAT(@HeadCap, 'C', 'en-US'), N' a month'), @CalcHeads, @HeadCap, @CapAdj);
+
+        IF @ExtraSeats > 0
+            INSERT INTO #sub (Sort, LineType, Description, Quantity, UnitPrice, Amount)
+            VALUES (20, 'SEATS', CONCAT(@ExtraSeats, N' extra seat', IIF(@ExtraSeats = 1, N'', N's'), N' (', @BilledSeats,
+                                        IIF(ISNULL(@Committed, 0) > ISNULL(@Peak, 0), N' committed', N' at the month''s peak'),
+                                        N', ', @Included, N' included)'),
+                    @ExtraSeats, @SeatPrice, @SeatCharge);
+
+        IF @OverReports > 0
+            INSERT INTO #sub (Sort, LineType, Description, Quantity, UnitPrice, Amount)
+            VALUES (30, 'PILO', CONCAT(@OverReports, N' Pilo reports over the ', @IncludedReports, N' included', IIF(@PiloCapped = 1, N' (capped)', N'')),
+                    @OverReports, @ReportPrice, @PiloCharge);
+
+        INSERT INTO #sub (Sort, LineType, Description, Quantity, UnitPrice, Amount, ChargeId)
+        SELECT 40, 'SERVICE', c.Description, 1, c.Amount, c.Amount, c.Id
+        FROM admin.PlatformCharge AS c WITH (UPDLOCK)
+        WHERE c.TenantId = @T AND c.Status = 'PENDING' AND c.BillOn = 'NEXT_STATEMENT' AND c.ChargeDate < @NextStart;
+
+        SELECT @SubTotal = ISNULL(SUM(CASE WHEN LineType IN ('PLAN', 'SEATS', 'PILO') THEN Amount END), 0),
+               @ServiceTotal = ISNULL(SUM(CASE WHEN LineType = 'SERVICE' THEN Amount END), 0)
+        FROM #sub;
+        SET @Net = @FeeTotal + @CapAdj + @MinAdj + @SubTotal + @ServiceTotal + @Credit;
 
         IF EXISTS (SELECT 1 FROM admin.PlatformFee WHERE TenantId = @T AND PlatformStatementId IS NULL AND AccruedAt < @Cutoff)
-           OR @MinAdj <> 0 OR @Credit <> 0 OR @SubTotal <> 0
+           OR @MinAdj <> 0 OR @Credit <> 0 OR @SubTotal <> 0 OR @ServiceTotal <> 0
         BEGIN
             INSERT INTO admin.PlatformStatement
                 (TenantId, StatementNumber, PeriodStart, PeriodEnd, StatementDate, DueDate, Status,
-                 FeeTotal, MinimumAdjustment, CreditApplied, AmountDue, CreditForward, PaidAt, SubscriptionTotal)
+                 FeeTotal, MinimumAdjustment, CreditApplied, AmountDue, CreditForward, PaidAt, SubscriptionTotal,
+                 CapAdjustment, ServiceTotal, BillableHeads, FeeCapAmount)
             VALUES
                 (@T, CONCAT('PS-', FORMAT(@PeriodStart, 'yyyyMM'), '-', RIGHT(CONCAT('00000', @T), 5)), @PeriodStart, @PeriodEnd, @Today, @Today,
                  CASE WHEN @Net > 0 THEN 'OPEN' ELSE 'PAID' END,
@@ -175,7 +186,7 @@ BEGIN
                  CASE WHEN @Net > 0 THEN @Net ELSE 0 END,
                  CASE WHEN @Net < 0 THEN -@Net ELSE 0 END,
                  CASE WHEN @Net > 0 THEN NULL ELSE SYSUTCDATETIME() END,
-                 @SubTotal);
+                 @SubTotal, @CapAdj, @ServiceTotal, @CalcHeads, @CapAmount);
             SET @StatementId = SCOPE_IDENTITY();
 
             INSERT INTO admin.PlatformStatementLine
@@ -193,8 +204,8 @@ BEGIN
 
             SELECT @Line = ISNULL(MAX(LineNumber), 0) FROM admin.PlatformStatementLine WHERE TenantId = @T AND StatementId = @StatementId;
 
-            INSERT INTO admin.PlatformStatementLine (TenantId, StatementId, LineNumber, LineType, Description, Amount, Quantity, UnitPrice)
-            SELECT @T, @StatementId, @Line + ROW_NUMBER() OVER (ORDER BY Sort, Description), LineType, Description, Amount, Quantity, UnitPrice
+            INSERT INTO admin.PlatformStatementLine (TenantId, StatementId, LineNumber, LineType, Description, Amount, Quantity, UnitPrice, PlatformChargeId)
+            SELECT @T, @StatementId, @Line + ROW_NUMBER() OVER (ORDER BY Sort, Description), LineType, Description, Amount, Quantity, UnitPrice, ChargeId
             FROM #sub;
             SET @Line += (SELECT COUNT(*) FROM #sub);
 
@@ -215,6 +226,11 @@ BEGIN
             SET PlatformStatementId = @StatementId,
                 FeeStatus = CASE WHEN FeeStatus = 'ACCRUED' THEN CASE WHEN @Net > 0 THEN 'BILLED' ELSE 'PAID' END ELSE FeeStatus END
             WHERE TenantId = @T AND PlatformStatementId IS NULL AND AccruedAt < @Cutoff;
+
+            UPDATE c SET Status = 'BILLED', StatementId = @StatementId
+            FROM admin.PlatformCharge AS c
+            JOIN #sub AS s ON s.ChargeId = c.Id
+            WHERE c.TenantId = @T;
         END;
 
         COMMIT;

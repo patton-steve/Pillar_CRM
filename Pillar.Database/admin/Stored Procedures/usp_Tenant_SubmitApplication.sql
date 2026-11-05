@@ -21,7 +21,7 @@ BEGIN
         THROW 52208, N'Please verify your email first.', 1;
     IF @RequestedPlanCode IS NOT NULL
     BEGIN
-        SELECT @PlanId = Id FROM admin.[Plan] WHERE Code = @RequestedPlanCode AND IsActive = 1;
+        SELECT @PlanId = Id FROM admin.[Plan] WHERE Code = @RequestedPlanCode AND IsActive = 1 AND IsPublic = 1;   -- handoff 26: public plans only
         IF @PlanId IS NULL THROW 52204, N'Unknown plan.', 1;
     END;
 

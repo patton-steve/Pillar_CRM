@@ -19,7 +19,7 @@ BEGIN
     IF @TenantId IS NULL OR @UserId IS NULL THROW 52216, N'SESSION_CONTEXT TenantId and UserId must be set.', 1;
     IF NOT EXISTS (SELECT 1 FROM sec.fn_UserHasPermission(@TenantId, @UserId, 'billing.manage'))
         THROW 52221, N'Only people who manage Pillar billing can change the plan.', 1;
-    SELECT @ToPlanId = Id, @ToPrice = MonthlyPrice FROM admin.[Plan] WHERE Code = @ToPlanCode AND IsActive = 1;
+    SELECT @ToPlanId = Id, @ToPrice = MonthlyPrice FROM admin.[Plan] WHERE Code = @ToPlanCode AND IsActive = 1 AND IsPublic = 1;   -- handoff 26: private plans are assigned by Pillar only
     IF @ToPlanId IS NULL THROW 52204, N'Unknown plan.', 1;
 
     BEGIN TRAN;

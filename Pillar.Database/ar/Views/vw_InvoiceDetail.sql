@@ -97,7 +97,9 @@ SELECT
     te.Hours,
     te.RateApplied,
     te.AmountBillable,
-    te.Description          AS TimeDescription
+    te.Description          AS TimeDescription,
+    -- card surcharge disclosure (handoff 25): set only when the invoice has a SURCHARGE line
+    i.CardSurchargeNote
 FROM ar.Invoice AS i
 JOIN admin.Tenant AS tn ON tn.Id = i.TenantId
 JOIN lkp.InvoiceStatus AS st ON st.TenantId = i.TenantId AND st.Id = i.InvoiceStatusId

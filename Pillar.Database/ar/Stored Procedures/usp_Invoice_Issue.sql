@@ -1,6 +1,10 @@
 -- Issues a draft: refuses a billing profile with no billing contact or an invoice with no lines,
 -- snapshots bill-to / terms / layout / remit from the profile (layout and remit fall back to the tenant defaults), sets InvoiceDate (default: tenant today) and DueDate,
 -- assigns the invoice number, marks its time INVOICED, and accrues the platform fee - all in one transaction.
+-- Handoff 25: the recalculation fixes the card processing fee (SURCHARGE line), and that line is left out of the platform
+-- fee base, because it passes the card processor's cost through.
+-- Handoff 26: the fee uses the terms in force on the invoice date (admin.fn_TenantTerms) and leaves rebilled EXPENSE lines out
+-- of the base when ExcludeExpensesFromFee is on. The per-head cap is applied on the monthly statement, not here.
 CREATE PROCEDURE ar.usp_Invoice_Issue
     @InvoiceId      INT,
     @InvoiceDate    DATE = NULL
@@ -13,7 +17,7 @@ BEGIN
             @UserId   INT = CAST(SESSION_CONTEXT(N'UserId') AS INT),
             @Now DATETIME2(0) = SYSUTCDATETIME(),
             @ProfileId INT, @ContactId INT, @Number INT, @InvoiceNumber NVARCHAR(50),
-            @SubTotal DECIMAL(19,2), @FeeRate DECIMAL(9,6), @FeeCap DECIMAL(19,2), @Fee DECIMAL(19,2);
+            @SubTotal DECIMAL(19,2), @FeeRate DECIMAL(9,6), @FeeCap DECIMAL(19,2), @Fee DECIMAL(19,2), @ExcludeExpenses BIT;
 
     BEGIN TRAN;
 
@@ -78,14 +82,16 @@ BEGIN
     JOIN lkp.TimeEntryStatus AS s ON s.TenantId = e.TenantId AND s.SystemCode = 'INVOICED'
     WHERE e.TenantId = @TenantId AND l.InvoiceId = @InvoiceId;
 
-    -- platform fee: tenant overrides (hidden PLATFORM_ONLY settings), else the plan's rate and cap
-    SELECT @FeeRate = COALESCE(TRY_CAST(f.Value AS DECIMAL(9,6)), p.FeeRate),
-           @FeeCap  = COALESCE(TRY_CAST(fc.Value AS DECIMAL(19,2)), p.PerInvoiceCap)
-    FROM admin.Tenant AS t
-    JOIN admin.[Plan] AS p ON p.Id = t.PlanId
-    OUTER APPLY admin.fn_Setting(t.Id, NULL, 'Platform.FeeRateOverride') AS f
-    OUTER APPLY admin.fn_Setting(t.Id, NULL, 'Platform.FeeCapOverride') AS fc
-    WHERE t.Id = @TenantId;
+    -- platform fee: the terms in force on the invoice date (admin.fn_TenantTerms: plan version, then Pillar's overrides; handoff 26)
+    SELECT @FeeRate = FeeRate, @FeeCap = PerInvoiceCap, @ExcludeExpenses = ExcludeExpensesFromFee
+    FROM admin.fn_TenantTerms(@TenantId, @InvoiceDate);
+
+    -- the fee base leaves out card surcharge lines (handoff 25) and, when the terms say so, rebilled expenses (handoff 26)
+    SELECT @SubTotal = @SubTotal - ISNULL(SUM(e.Amount), 0)
+    FROM ar.InvoiceEntry AS e
+    JOIN lkp.InvoiceLineType AS lt ON lt.TenantId = e.TenantId AND lt.Id = e.LineTypeId
+    WHERE e.TenantId = @TenantId AND e.InvoiceId = @InvoiceId
+      AND (lt.SystemCode = 'SURCHARGE' OR (lt.SystemCode = 'EXPENSE' AND @ExcludeExpenses = 1));
 
     SET @Fee = ROUND(@SubTotal * @FeeRate, 2);
     IF @FeeCap IS NOT NULL AND @Fee > @FeeCap SET @Fee = @FeeCap;

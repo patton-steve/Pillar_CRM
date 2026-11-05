@@ -1,6 +1,7 @@
 -- Daily platform job (IsPlatformAdmin), before admin.usp_PlatformStatement_Generate on the 1st: applies waiting downgrades whose
 -- EffectiveDate has come. Saved Pilo reports past the new limits stay readable; new saves are refused by usp_SavedReport_Save.
--- Returns how many were applied.
+-- Handoff 26: also applies plan versions and scheduled tenant overrides that start today (admin.usp_PlanVersion_ApplyDue).
+-- Returns two result sets: the plans and overrides updated, then how many downgrades were applied.
 CREATE PROCEDURE admin.usp_PlanChange_ApplyDue
 AS
 BEGIN
@@ -25,6 +26,9 @@ BEGIN
     END;
     CLOSE due;
     DEALLOCATE due;
+
+    -- handoff 26: plan versions and scheduled tenant overrides that start today (its own result set follows)
+    EXEC admin.usp_PlanVersion_ApplyDue;
 
     SELECT @Applied AS Applied;
 END;

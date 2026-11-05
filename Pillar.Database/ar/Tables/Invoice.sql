@@ -43,10 +43,18 @@ CREATE TABLE ar.Invoice
     ModifiedAt          DATETIME2(0)    NULL,
     ModifiedBy          INT             NULL,
     RowVer              ROWVERSION      NOT NULL,
+    -- card surcharge (handoff 25), kept by ar.usp_Invoice_SyncSurcharge while a draft:
+    --   CardSurchargeWaived  someone deleted the SURCHARGE line on this draft, so it isn't added back
+    --   CardSurchargeRate    the rate on the SURCHARGE line; NULL when there is none
+    --   CardSurchargeNote    the disclosure printed with it, {rate} filled in; NULL when there is no SURCHARGE line
+    CardSurchargeWaived BIT             NOT NULL CONSTRAINT DF_Invoice_CardSurchargeWaived DEFAULT (0),
+    CardSurchargeRate   DECIMAL(9,6)    NULL,
+    CardSurchargeNote   NVARCHAR(400)   NULL,
     CONSTRAINT UQ_Invoice_PublicId UNIQUE (PublicId),
     CONSTRAINT UQ_Invoice_Tenant_Id UNIQUE (TenantId, Id),
     CONSTRAINT UQ_Invoice_Tenant_Client_Id UNIQUE (TenantId, ClientId, Id),
     CONSTRAINT CK_Invoice_TaxRate CHECK (TaxRate >= 0 AND TaxRate < 1),
+    CONSTRAINT CK_Invoice_CardSurchargeRate CHECK (CardSurchargeRate IS NULL OR (CardSurchargeRate > 0 AND CardSurchargeRate <= 0.04)),
     CONSTRAINT CK_Invoice_AmountPaid CHECK (AmountPaid >= 0),
     CONSTRAINT CK_Invoice_DueDate CHECK (DueDate IS NULL OR InvoiceDate IS NULL OR DueDate >= InvoiceDate),
     CONSTRAINT FK_Invoice_Client FOREIGN KEY (TenantId, ClientId) REFERENCES crm.Client (TenantId, Id),

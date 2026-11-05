@@ -19,7 +19,9 @@ BEGIN
                   CASE WHEN b.CountryCode <> 'US' THEN b.CountryCode END) AS TenantAddress,
         b.Email AS TenantEmail,
         l.LineNumber, l.LineType, l.InvoiceNumber, l.ClientName, l.InvoiceDate, l.Description,
-        l.FeeBaseAmount, l.FeeRate, l.Amount
+        l.FeeBaseAmount, l.FeeRate, l.Amount,
+        -- handoff 26, appended
+        s.SubscriptionTotal, s.CapAdjustment, s.ServiceTotal, s.BillableHeads, s.FeeCapAmount, l.Quantity, l.UnitPrice
     FROM admin.PlatformStatement AS s
     JOIN admin.Tenant AS t ON t.Id = s.TenantId
     LEFT JOIN admin.TenantBranding AS b ON b.TenantId = s.TenantId

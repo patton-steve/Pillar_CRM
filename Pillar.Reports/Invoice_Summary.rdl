@@ -305,6 +305,10 @@
           <DataField>TimeDescription</DataField>
           <rd:TypeName>System.String</rd:TypeName>
         </Field>
+        <Field Name="CardSurchargeNote">
+          <DataField>CardSurchargeNote</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
       </Fields>
     </DataSet>
     <DataSet Name="Logo">
@@ -2021,6 +2025,20 @@
                 </TextRuns>
                 <Style/>
               </Paragraph>
+              <Paragraph>
+                <TextRuns>
+                  <TextRun>
+                    <Value>=First(Fields!CardSurchargeNote.Value, "InvoiceDetail")</Value>
+                    <Style>
+                      <FontFamily>Segoe UI</FontFamily>
+                      <FontSize>9pt</FontSize>
+                      <FontStyle>Italic</FontStyle>
+                      <Color>#000000</Color>
+                    </Style>
+                  </TextRun>
+                </TextRuns>
+                <Style/>
+              </Paragraph>
             </Paragraphs>
             <rd:DefaultName>Notes</rd:DefaultName>
             <Top>4.180000000000001in</Top>
@@ -2028,7 +2046,7 @@
             <Height>0.45in</Height>
             <Width>4.3in</Width>
             <Visibility>
-              <Hidden>=IsNothing(First(Fields!InvoiceNotes.Value, "InvoiceDetail"))</Hidden>
+              <Hidden>=IsNothing(First(Fields!InvoiceNotes.Value, "InvoiceDetail")) And IsNothing(First(Fields!CardSurchargeNote.Value, "InvoiceDetail"))</Hidden>
             </Visibility>
             <Style>
               <Border>

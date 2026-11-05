@@ -3,6 +3,7 @@
 -- The invoice copies terms, layout, remit, billing contact and address when created.
 -- A default profile is created with each client by crm.trg_Client_CreateDefaultBillingProfile.
 -- BillingContactId may be NULL until a contact exists; invoice create/issue refuses a profile without one.
+-- ApplyCardSurcharge = 1 adds a SURCHARGE line (Invoice.CardSurchargeRate) to this profile's drafts (ar.usp_Invoice_SyncSurcharge).
 CREATE TABLE crm.ClientBillingProfile
 (
     Id                  INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_ClientBillingProfile PRIMARY KEY CLUSTERED,
@@ -29,6 +30,9 @@ CREATE TABLE crm.ClientBillingProfile
     ModifiedBy          INT             NULL,
     RowVer              ROWVERSION      NOT NULL,
     InvoiceEmailTemplateId INT        NULL,      -- INVOICE email template; NULL = the tenant's default (admin.fn_EmailTemplateFor)
+    -- handoff 25 (Steve 2026-11-04): how the client usually pays (informational) and whether card invoices get the surcharge line
+    PreferredPaymentMethodId INT      NULL,
+    ApplyCardSurcharge  BIT             NOT NULL CONSTRAINT DF_ClientBillingProfile_ApplyCardSurcharge DEFAULT (0),
     CONSTRAINT UQ_ClientBillingProfile_PublicId UNIQUE (PublicId),
     CONSTRAINT UQ_ClientBillingProfile_Tenant_Id UNIQUE (TenantId, Id),
     CONSTRAINT UQ_ClientBillingProfile_Tenant_Client_Id UNIQUE (TenantId, ClientId, Id),
@@ -43,7 +47,8 @@ CREATE TABLE crm.ClientBillingProfile
     CONSTRAINT FK_ClientBillingProfile_PaymentTerm FOREIGN KEY (TenantId, PaymentTermId) REFERENCES lkp.PaymentTerm (TenantId, Id),
     CONSTRAINT FK_ClientBillingProfile_InvoiceLayout FOREIGN KEY (TenantId, InvoiceLayoutId) REFERENCES ar.InvoiceLayout (TenantId, Id),
     CONSTRAINT FK_ClientBillingProfile_RemitProfile FOREIGN KEY (TenantId, RemitProfileId) REFERENCES admin.RemitProfile (TenantId, Id),
-    CONSTRAINT FK_ClientBillingProfile_EmailTemplate FOREIGN KEY (TenantId, InvoiceEmailTemplateId) REFERENCES admin.EmailTemplate (TenantId, Id)
+    CONSTRAINT FK_ClientBillingProfile_EmailTemplate FOREIGN KEY (TenantId, InvoiceEmailTemplateId) REFERENCES admin.EmailTemplate (TenantId, Id),
+    CONSTRAINT FK_ClientBillingProfile_PaymentMethod FOREIGN KEY (TenantId, PreferredPaymentMethodId) REFERENCES lkp.PaymentMethod (TenantId, Id)
 );
 GO
 -- At most one default profile per client; the client insert trigger supplies the first.

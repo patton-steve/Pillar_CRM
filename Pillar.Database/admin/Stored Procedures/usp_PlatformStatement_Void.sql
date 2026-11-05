@@ -1,5 +1,6 @@
 -- Voids an unpaid statement (IsPlatformAdmin), e.g. to correct a fee override and regenerate the month.
--- Its fees go back to unbilled (BILLED or PAID-by-zero -> ACCRUED) so the next generate picks them up; lines stay for history.
+-- Its fees go back to unbilled (BILLED or PAID-by-zero -> ACCRUED) and its one-time charges to PENDING, so the next generate picks
+-- them up; lines stay for history.
 CREATE PROCEDURE admin.usp_PlatformStatement_Void
     @StatementId    INT,
     @Reason         NVARCHAR(500)
@@ -25,6 +26,10 @@ BEGIN
     SET PlatformStatementId = NULL,
         FeeStatus = CASE WHEN FeeStatus = 'REVERSAL' THEN FeeStatus ELSE 'ACCRUED' END
     WHERE PlatformStatementId = @StatementId;
+
+    -- handoff 26: its one-time charges go back to PENDING for the regenerated statement
+    UPDATE admin.PlatformCharge SET Status = 'PENDING', StatementId = NULL
+    WHERE StatementId = @StatementId AND Status = 'BILLED';
 
     UPDATE admin.PlatformStatement
     SET Status = 'VOID', VoidedAt = SYSUTCDATETIME(), VoidReason = @Reason

@@ -1,4 +1,5 @@
 -- Recomputes SubTotal and TaxAmount of a draft from its lines. Call after editing draft lines.
+-- Handoff 25: first keeps the card processing fee line current (ar.usp_Invoice_SyncSurcharge).
 CREATE PROCEDURE ar.usp_Invoice_Recalculate
     @InvoiceId INT
 AS
@@ -6,6 +7,8 @@ BEGIN
     SET NOCOUNT ON;
 
     DECLARE @TenantId INT = CAST(SESSION_CONTEXT(N'TenantId') AS INT);
+
+    EXEC ar.usp_Invoice_SyncSurcharge @InvoiceId = @InvoiceId;
 
     UPDATE i
     SET SubTotal  = ISNULL(l.SubTotal, 0),

@@ -9,6 +9,7 @@
 -- Work for profiles without a billing contact, or clients that are not ACTIVE, is skipped and logged in
 -- ar.InvoiceRunException. Other lines (DISCOUNT, one-off ADJUSTMENT) are added by hand to drafts.
 -- Time entries are linked to draft lines (so the next run won't pick them up) but stay APPROVED until issue.
+-- Profiles with ApplyCardSurcharge get a SURCHARGE line (ar.usp_Invoice_SyncSurcharge) before totals.
 CREATE PROCEDURE ar.usp_InvoiceRun_Generate
     @PeriodEnd      DATE,
     @ClientId       INT = NULL,
@@ -282,6 +283,9 @@ BEGIN
     WHERE m.TenantId = @TenantId;
 
     ------------------------------------------------------------ totals
+    -- card processing fee on drafts for profiles that pay by card (handoff 25)
+    EXEC ar.usp_Invoice_SyncSurcharge @InvoiceRunId = @InvoiceRunId;
+
     UPDATE i
     SET SubTotal  = l.SubTotal,
         TaxAmount = CASE WHEN i.TaxExempt = 1 THEN 0 ELSE ROUND(l.Taxable * i.TaxRate, 2) END,

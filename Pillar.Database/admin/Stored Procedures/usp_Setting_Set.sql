@@ -1,6 +1,6 @@
 -- Sets (or clears, with @Value = NULL and @Clear = 1) a tenant or user setting.
 -- Tenants may only change TENANT_EDIT settings; TENANT_READ and PLATFORM_ONLY need IsPlatformAdmin.
--- Validates the value against DataType and AllowedValues.
+-- Validates the value against DataType and AllowedValues (and Invoice.CardSurchargeRate against 0 to 0.04).
 -- Who may change it (handoff 21): a tenant value needs the setting's page permission (SettingDefinition.PermissionCode,
 -- e.g. settings.time); a per-user override may be set by that user or by someone with the page permission. Pillar staff
 -- (IsPlatformAdmin) and calls without a user in session (sign-up, seeds) skip the check. Tenant-value changes are audited.
@@ -41,6 +41,10 @@ BEGIN
 
         IF @Allowed IS NOT NULL AND NOT EXISTS (SELECT 1 FROM OPENJSON(@Allowed) WHERE [value] = @Value)
             THROW 50405, N'Value is not one of the allowed values.', 1;
+
+        -- handoff 25: card networks cap surcharges near 3%; Pillar allows up to 4% (the UI warns above 3%)
+        IF @SettingKey = 'Invoice.CardSurchargeRate' AND NOT (TRY_CAST(@Value AS DECIMAL(19,6)) >= 0 AND TRY_CAST(@Value AS DECIMAL(19,6)) <= 0.04)
+            THROW 52505, N'The card processing fee rate must be between 0 and 0.04 (4%).', 1;
     END;
 
     IF @AppUserId IS NULL

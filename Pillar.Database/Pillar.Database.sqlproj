@@ -16,6 +16,9 @@
     <Build Update="Security\usp_ReportContext_Set.sql">
       <SuppressTSqlWarnings>71502</SuppressTSqlWarnings>
     </Build>
+    <Build Update="ar\Stored Procedures\usp_Invoice_SyncSurcharge.sql">
+      <SuppressTSqlWarnings>71502</SuppressTSqlWarnings>
+    </Build>
     <Build Update="Security\usp_PiloReader_SetContext.sql">
       <SuppressTSqlWarnings>71502</SuppressTSqlWarnings>
     </Build>
